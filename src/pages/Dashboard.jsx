@@ -1,21 +1,14 @@
 /**
- * Dashboard.jsx
+ * Dashboard.jsx — Clean operator view
  *
- * Status data fields found in StatusTable:
- *   sysid, datetime, status, conf, info_status, topic
- *   r1_min_d, r1_max_d, r1_pos, r1_n_steps, r1_rad, r1_rpm, r1_step
- *   (r2_* fields present when conf=1 with full config)
- *
- * info_status contains two types:
- *   - "CpuTemp: 62 SensorTemp: 40"  → parsed into temp cards
- *   - Event strings like "MQTT received valid System Configuration"
+ * Row 1: PLC Parameters — System ID | System Status | Internet Connection
+ * Row 2: Roll Parameters — Sensor Temp R1 | Sensor Temp R2 | RPM R1 | RPM R2 | Radius R1 | Radius R2
  */
-import React, { useState, useCallback } from 'react'
-import { subHours } from 'date-fns'
-import { fetchDashboard, fetchStatusHistory, toArray } from '../services/api'
+import React from 'react'
+import { differenceInMinutes } from 'date-fns'
+import { fetchDashboard, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
-import { Spinner, ErrorBanner, StatCard, SectionHead, KVRow, EmptyState } from '../components'
-import DateRangePicker from '../components/DateRangePicker'
+import { Spinner, ErrorBanner, EmptyState } from '../components'
 import SysIdSelector, { useSysId } from '../components/SysIdSelector'
 import { useRollNames } from '../components/RollNameContext'
 
@@ -30,133 +23,91 @@ function fmtDt(val) {
   return String(val).replace('T', ' ').slice(0, 19)
 }
 
-// ── Parse "CpuTemp: 62 SensorTemp: 40" from info_status ─────
+// Parse "CpuTemp: 62 SensorTemp: 40" from info_status
 function parseTemps(info_status) {
-  if (!info_status) return null
+  if (!info_status) return { cpu: null, sensor: null }
   const s = String(info_status)
   const cpuMatch    = s.match(/CpuTemp:\s*([\d.]+)/)
   const sensorMatch = s.match(/SensorTemp:\s*([\d.]+)/)
-  if (!cpuMatch && !sensorMatch) return null
   return {
     cpu:    cpuMatch    ? parseFloat(cpuMatch[1])    : null,
     sensor: sensorMatch ? parseFloat(sensorMatch[1]) : null,
   }
 }
 
-// ── Classify info_status as temp reading or event message ────
-function classifyInfoStatus(info_status) {
-  if (!info_status) return 'none'
-  const s = String(info_status)
-  if (s.includes('CpuTemp') || s.includes('SensorTemp')) return 'temp'
-  if (s.trim() === '' || s === 'No error') return 'none'
-  return 'event'
+// Parse DynamoDB datetime to JS Date
+function parseDynamoDate(val) {
+  if (!val) return null
+  try {
+    const s = String(val)
+    const parts = s.split('-')
+    if (parts.length >= 4) {
+      const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
+      const d = new Date(iso)
+      if (!isNaN(d)) return d
+    }
+    const d = new Date(s)
+    return isNaN(d) ? null : d
+  } catch { return null }
 }
 
-// ── Temperature gauge card ───────────────────────────────────
-function TempCard({ label, value, unit = '°C', warnAt, critAt }) {
-  if (value === null || value === undefined) return null
-  const v = parseFloat(value)
-  const color = critAt && v >= critAt ? '#ef4444'
-              : warnAt && v >= warnAt ? '#f59e0b'
-              : '#22c55e'
-  const accent = critAt && v >= critAt ? 'nok'
-               : warnAt && v >= warnAt ? 'warn'
-               : 'ok'
+// ── Reusable card components ──────────────────────────────────
+
+function SectionLabel({ text }) {
   return (
-    <div className="card" style={{ borderLeft: `3px solid ${color}` }}>
-      <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '8px' }}>{label}</div>
-      <div style={{ fontSize: '28px', fontWeight: '700', color, lineHeight: 1 }}>
-        {v}<span style={{ fontSize: '14px', fontWeight: '400', color: '#94a3b8', marginLeft: '3px' }}>{unit}</span>
+    <div style={{
+      fontSize: '11px', fontWeight: '700', color: '#64748b',
+      textTransform: 'uppercase', letterSpacing: '0.08em',
+      marginBottom: '12px', marginTop: '8px',
+    }}>{text}</div>
+  )
+}
+
+function StatusCard({ label, children, accentColor }) {
+  return (
+    <div style={{
+      background: '#fff', borderRadius: '14px', padding: '20px 22px',
+      border: '1px solid #e2e8f0', borderLeft: `4px solid ${accentColor}`,
+      boxShadow: '0 1px 4px rgba(0,0,0,0.04)', flex: 1,
+    }}>
+      <div style={{ fontSize: '11px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px' }}>
+        {label}
       </div>
-      {warnAt && (
-        <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '6px' }}>
-          {v >= (critAt || 999) ? '🔴 Critical' : v >= warnAt ? '🟡 High' : '🟢 Normal'}
-        </div>
-      )}
+      {children}
     </div>
   )
 }
 
-// ── Status badge ─────────────────────────────────────────────
-function StatusBadge({ status }) {
-  const s = safeStr(status).toUpperCase()
-  const ok = s === 'OK'
+function MetricCard({ label, value, unit, color, sub }) {
   return (
-    <span className={ok ? 'badge-ok' : s === '—' ? 'badge-warn' : 'badge-nok'}>
-      <span className={ok ? 'pulse-ok' : 'pulse-nok'} />
-      {s === '—' ? 'Unknown' : s}
-    </span>
-  )
-}
-
-// ── Roll config card (only shows if conf=1 and values exist) ─
-function RollConfig({ prefix, label, rec }) {
-  if (!rec) return null
-  const v = (key, unit = '') => {
-    const val = rec[`${prefix}_${key}`]
-    if (val === undefined || val === null || val === '') return '—'
-    return `${val}${unit ? ' ' + unit : ''}`
-  }
-  const hasData = ['min_d','max_d','pos','n_steps','rad','rpm','step']
-    .some(k => rec[`${prefix}_${k}`] !== undefined && rec[`${prefix}_${k}`] !== '')
-
-  return (
-    <div className="card">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', paddingBottom: '8px', borderBottom: '2px solid #eff6ff' }}>
-        <div style={{ fontSize: '12px', fontWeight: '700', color: '#1d6fbd', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{label}</div>
-        {!hasData && <span className="badge-warn">No config data</span>}
+    <div style={{
+      background: '#fff', borderRadius: '14px', padding: '20px 22px',
+      border: '1px solid #e2e8f0', borderLeft: `4px solid ${color || '#3b82f6'}`,
+      boxShadow: '0 1px 4px rgba(0,0,0,0.04)', flex: 1,
+    }}>
+      <div style={{ fontSize: '11px', fontWeight: '700', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '8px' }}>
+        {label}
       </div>
-      {hasData ? (
-        <>
-          <KVRow label="Min distance"   value={v('min_d', 'mm')} mono />
-          <KVRow label="Max distance"   value={v('max_d', 'mm')} mono />
-          <KVRow label="Start position" value={v('pos', 'mm')}   mono />
-          <KVRow label="Steps"          value={v('n_steps')}      mono />
-          <KVRow label="Step size"      value={v('step', 'mm')}  mono />
-          <KVRow label="Roll radius"    value={v('rad', 'mm')}   mono />
-          <KVRow label="RPM"            value={v('rpm', 'rpm')}  mono />
-        </>
-      ) : (
-        <div style={{ fontSize: '12px', color: '#94a3b8', padding: '8px 0', lineHeight: '1.6' }}>
-          Roll configuration is not available. Configuration is sent via MeasConfig and stored when <code style={{ background: '#f1f5f9', padding: '1px 5px', borderRadius: '4px' }}>conf=1</code>.
-        </div>
-      )}
+      <div style={{ fontSize: '28px', fontWeight: '700', color: color || '#1e293b', lineHeight: 1 }}>
+        {value ?? '—'}
+        {unit && value !== '—' && value !== null && value !== undefined && (
+          <span style={{ fontSize: '14px', fontWeight: '400', color: '#94a3b8', marginLeft: '4px' }}>{unit}</span>
+        )}
+      </div>
+      {sub && <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>{sub}</div>}
     </div>
   )
 }
 
-// ── Event log item ────────────────────────────────────────────
-function EventItem({ datetime, message, type }) {
-  const colors = {
-    config:  { bg: '#eff6ff', border: '#bfdbfe', text: '#1e40af', label: 'Config' },
-    stop:    { bg: '#fef9c3', border: '#fde68a', text: '#854d0e', label: 'Stop'   },
-    start:   { bg: '#f0fdf4', border: '#bbf7d0', text: '#166534', label: 'Start'  },
-    error:   { bg: '#fff5f5', border: '#fecaca', text: '#991b1b', label: 'Error'  },
-    info:    { bg: '#f8fafc', border: '#e2e8f0', text: '#334155', label: 'Info'   },
-  }
-  const c = colors[type] || colors.info
+function PulsingDot({ color }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '9px 0', borderBottom: '1px solid #f1f5f9' }}>
-      <span style={{ fontSize: '10px', fontWeight: '700', padding: '2px 8px', borderRadius: '20px', background: c.bg, border: `1px solid ${c.border}`, color: c.text, whiteSpace: 'nowrap', marginTop: '1px' }}>
-        {c.label}
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.4' }}>{message}</div>
-        <div style={{ fontSize: '10px', color: '#94a3b8', fontFamily: '"JetBrains Mono",monospace', marginTop: '2px' }}>{fmtDt(datetime)}</div>
-      </div>
-    </div>
+    <span style={{
+      display: 'inline-block', width: '9px', height: '9px',
+      borderRadius: '50%', background: color,
+      marginRight: '7px', verticalAlign: 'middle',
+      animation: 'pulse 2s infinite',
+    }} />
   )
-}
-
-// ── Classify event type from info_status string ───────────────
-function getEventType(info) {
-  if (!info) return 'info'
-  const s = String(info).toLowerCase()
-  if (s.includes('configuration') || s.includes('config')) return 'config'
-  if (s.includes('stop')) return 'stop'
-  if (s.includes('start')) return 'start'
-  if (s.includes('error') || s.includes('nok')) return 'error'
-  return 'info'
 }
 
 export default function Dashboard() {
@@ -166,47 +117,49 @@ export default function Dashboard() {
   const { data: dashRaw, loading, error, refresh } =
     useApi(fetchDashboard, [sysid], { pollMs: 30000 })
 
-  const dashData    = (dashRaw && typeof dashRaw === 'object' && !Array.isArray(dashRaw)) ? dashRaw : {}
-  const statusList  = toArray(dashData.status).filter(r => r.sysid && r.sysid !== 'unknown')
-  const startList   = toArray(dashData.measStarted)
-  const finishList  = toArray(dashData.measFinished)
-  const latest      = statusList[0] ?? null
+  const dashData   = (dashRaw && typeof dashRaw === 'object' && !Array.isArray(dashRaw)) ? dashRaw : {}
+  const statusList = toArray(dashData.status).filter(r => r.sysid && r.sysid !== 'unknown')
+  const latest     = statusList[0] ?? null
 
-  // Parse temperatures from latest record
-  const temps = latest ? parseTemps(latest.info_status) : null
+  // Parse values
+  const temps       = latest ? parseTemps(latest.info_status) : { cpu: null, sensor: null }
+  const lastSeenDt  = latest ? parseDynamoDate(latest.datetime) : null
+  const minsAgo     = lastSeenDt ? differenceInMinutes(new Date(), lastSeenDt) : null
+  const isOnline    = minsAgo !== null && minsAgo < 30
+  const statusOk    = safeStr(latest?.status).toUpperCase() === 'OK'
 
-  // Build event log from all status records — only non-temp info_status
-  const eventLog = statusList
-    .filter(r => classifyInfoStatus(r.info_status) === 'event')
-    .slice(0, 8)
+  // Safe numeric values
+  const safeNum = (val) => {
+    const n = parseFloat(val)
+    return isNaN(n) ? null : n
+  }
 
-  // Historical
-  const [from,        setFrom]        = useState(subHours(new Date(), 24))
-  const [to,          setTo]          = useState(new Date())
-  const [histLoading, setHistLoading] = useState(false)
-  const [histData,    setHistData]    = useState(null)
-  const [histError,   setHistError]   = useState(null)
+  const r1_rpm  = safeNum(latest?.r1_rpm)
+  const r2_rpm  = safeNum(latest?.r2_rpm)
+  const r1_rad  = safeNum(latest?.r1_rad)
+  const r2_rad  = safeNum(latest?.r2_rad)
 
-  const loadHistory = useCallback(async () => {
-    if (!from || !to) return
-    setHistLoading(true); setHistError(null); setHistData(null)
-    const { data, error: e } = await fetchStatusHistory(sysid, from.toISOString(), to.toISOString())
-    setHistData(toArray(data).filter(r => r.sysid && r.sysid !== 'unknown'))
-    setHistError(e)
-    setHistLoading(false)
-  }, [sysid, from, to])
-
-  const recentStarts   = startList.slice(0, 5)
-  const recentFinished = finishList.slice(0, 5)
+  // Temp color logic
+  const tempColor = (val, warn, crit) => {
+    if (val === null) return '#94a3b8'
+    if (val >= crit) return '#ef4444'
+    if (val >= warn) return '#f59e0b'
+    return '#22c55e'
+  }
 
   return (
-    <div style={{ maxWidth: '960px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ maxWidth: '1000px', display: 'flex', flexDirection: 'column', gap: '0' }}>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+      {/* ── Header ── */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '24px' }}>
         <div>
           <h2 style={{ fontSize: '20px', fontWeight: '700', color: '#1e293b', margin: 0 }}>Live Dashboard</h2>
-          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '3px' }}>Auto-refreshes every 30s</div>
+          <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '3px' }}>
+            Auto-refreshes every 30s
+            {lastSeenDt && (
+              <span> · Last data: <span style={{ fontFamily: 'monospace' }}>{fmtDt(latest?.datetime)}</span></span>
+            )}
+          </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           <SysIdSelector value={sysid} onChange={setSysId} />
@@ -217,208 +170,197 @@ export default function Dashboard() {
 
       <ErrorBanner message={error} onRetry={refresh} />
 
-      {latest ? (
-        <>
-          {/* ── Row 1: Status + System ID + Config status ── */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
-
-            {/* System ID */}
-            <div className="card" style={{ borderLeft: '3px solid #3b82f6' }}>
-              <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '8px' }}>System ID</div>
-              <div style={{ fontSize: '12px', fontWeight: '700', color: '#1e293b', fontFamily: '"JetBrains Mono",monospace', wordBreak: 'break-all', lineHeight: '1.6' }}>
-                {safeStr(latest.sysid)}
-              </div>
-              <div style={{ fontSize: '10px', color: '#94a3b8', fontFamily: '"JetBrains Mono",monospace', marginTop: '4px' }}>
-                {fmtDt(latest.datetime)}
-              </div>
-            </div>
-
-            {/* Status */}
-            <div className="card" style={{ borderLeft: '3px solid ' + (safeStr(latest.status).toUpperCase() === 'OK' ? '#22c55e' : '#ef4444') }}>
-              <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '10px' }}>System Status</div>
-              <StatusBadge status={latest.status} />
-              <div style={{ fontSize: '11px', color: '#64748b', marginTop: '8px', lineHeight: '1.5' }}>
-                {classifyInfoStatus(latest.info_status) === 'temp'
-                  ? 'All systems normal'
-                  : classifyInfoStatus(latest.info_status) === 'event'
-                  ? safeStr(latest.info_status)
-                  : 'No errors reported'}
-              </div>
-            </div>
-
-            {/* Config validity */}
-            <div className="card" style={{ borderLeft: `3px solid ${latest.conf ? '#22c55e' : '#f59e0b'}` }}>
-              <div style={{ fontSize: '11px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: '10px' }}>Configuration</div>
-              <span className={latest.conf ? 'badge-ok' : 'badge-warn'}>
-                <span className={latest.conf ? 'pulse-ok' : 'pulse-nok'} />
-                {latest.conf ? 'Valid (conf=1)' : 'Not configured (conf=0)'}
-              </span>
-              <div style={{ fontSize: '11px', color: '#64748b', marginTop: '8px', lineHeight: '1.5' }}>
-                {latest.conf
-                  ? 'Measurement configuration received from PLC.'
-                  : 'No valid configuration received yet. Send MeasConfig from Roll Control page.'}
-              </div>
-            </div>
-          </div>
-
-          {/* ── Row 2: Temperature cards (parsed from info_status) ── */}
-          {temps && (
-            <div>
-              <SectionHead title="Hardware Temperatures" />
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '16px' }}>
-                {temps.cpu !== null && (
-                  <TempCard label="CPU Temperature" value={temps.cpu} warnAt={70} critAt={85} />
-                )}
-                {temps.sensor !== null && (
-                  <TempCard label="Sensor Temperature" value={temps.sensor} warnAt={50} critAt={65} />
-                )}
-                <StatCard label="r1 RPM" value={safeStr(latest.r1_rpm) !== '—' && latest.r1_rpm !== '' ? safeStr(latest.r1_rpm) : '—'} unit="rpm" accent="info" />
-                <StatCard label="r1 Radius" value={safeStr(latest.r1_rad) !== '—' && latest.r1_rad !== '' ? safeStr(latest.r1_rad) : '—'} unit="mm" accent="info" />
-              </div>
-            </div>
-          )}
-
-          {/* ── Row 3: Roll Configuration ── */}
-          <SectionHead title="Roll Configuration (last conf=1 record)" />
-          {(() => {
-            // Find the most recent record where conf=1 to show config
-            const confRecord = statusList.find(r => r.conf == 1) ?? latest
-            return (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                <RollConfig prefix="r1" label="Roll 1" rec={confRecord} />
-                <RollConfig prefix="r2" label="Roll 2" rec={confRecord} />
-              </div>
-            )
-          })()}
-
-          {/* ── Row 4: Event log ── */}
-          {eventLog.length > 0 && (
-            <div className="card">
-              <SectionHead title="Recent System Events" />
-              <div>
-                {eventLog.map((r, i) => (
-                  <EventItem
-                    key={i}
-                    datetime={r.datetime}
-                    message={safeStr(r.info_status)}
-                    type={getEventType(r.info_status)}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      ) : !loading && (
-        <EmptyState icon="📡" title="No status data"
-          message={`No records found for device "${sysid}". Select a different device or check your Lambda and StatusTable.`} />
+      {!latest && !loading && (
+        <EmptyState icon="📡" title="No data received"
+          message={`No status records found for device "${sysid}". Check that the PLC is connected and publishing to AWS IoT Core.`} />
       )}
 
-      {/* ── Historical status ── */}
-      <div className="card">
-        <SectionHead
-          title="Historical Status"
-          action={
-            <button className="btn-primary" style={{ fontSize: '12px', padding: '7px 16px' }}
-              onClick={loadHistory} disabled={histLoading}>
-              {histLoading ? <Spinner size="sm" /> : '↻ Load History'}
-            </button>
-          }
-        />
-        <DateRangePicker from={from} to={to} onFromChange={setFrom} onToChange={setTo} />
-        <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '10px', marginTop: '4px' }}>
-          Querying <span style={{ fontFamily: '"JetBrains Mono",monospace', color: '#1d4ed8' }}>{sysid}</span> — select a range and click Load History.
-        </div>
-        <ErrorBanner message={histError} />
-        {histLoading && <div style={{ display: 'flex', justifyContent: 'center', padding: '2rem' }}><Spinner /></div>}
+      {latest && (
+        <>
+          {/* ══ ROW 1: PLC Parameters ══ */}
+          <SectionLabel text="PLC Parameters" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '28px' }}>
 
-        {!histLoading && histData && histData.length > 0 && (
-          <div style={{ marginTop: '12px', overflowX: 'auto' }}>
-            <div style={{ fontSize: '12px', color: '#64748b', fontWeight: '600', marginBottom: '8px' }}>
-              {histData.length} record{histData.length !== 1 ? 's' : ''} found
-            </div>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Datetime</th><th>Status</th><th>Conf</th>
-                  <th>CPU Temp</th><th>Sensor Temp</th>
-                  <th>r1 RPM</th><th>r1 Radius</th><th>Info / Event</th>
-                </tr>
-              </thead>
-              <tbody>
-                {histData.map((row, i) => {
-                  const t = parseTemps(row.info_status)
-                  const isEvent = classifyInfoStatus(row.info_status) === 'event'
-                  return (
-                    <tr key={i}>
-                      <td style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: '11px', whiteSpace: 'nowrap' }}>{fmtDt(row.datetime)}</td>
-                      <td><StatusBadge status={row.status} /></td>
-                      <td>{row.conf == 1 ? <span className="badge-ok">Valid</span> : <span className="badge-warn">—</span>}</td>
-                      <td style={{ fontFamily: '"JetBrains Mono",monospace' }}>{t?.cpu !== null && t?.cpu !== undefined ? `${t.cpu}°C` : '—'}</td>
-                      <td style={{ fontFamily: '"JetBrains Mono",monospace' }}>{t?.sensor !== null && t?.sensor !== undefined ? `${t.sensor}°C` : '—'}</td>
-                      <td style={{ fontFamily: '"JetBrains Mono",monospace' }}>{row.r1_rpm || '—'}</td>
-                      <td style={{ fontFamily: '"JetBrains Mono",monospace' }}>{row.r1_rad || '—'}</td>
-                      <td style={{ fontSize: '11px', color: isEvent ? '#1e40af' : '#94a3b8', maxWidth: '200px' }}>
-                        {isEvent ? safeStr(row.info_status) : '—'}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            {/* System ID */}
+            <StatusCard label="System ID" accentColor="#3b82f6">
+              <div style={{ fontSize: '18px', fontWeight: '700', color: '#1e293b', fontFamily: 'monospace', wordBreak: 'break-all', lineHeight: '1.4' }}>
+                {safeStr(latest.sysid)}
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
+                PLC · AMS NetID
+              </div>
+            </StatusCard>
+
+            {/* System Status */}
+            <StatusCard label="System Status" accentColor={statusOk ? '#22c55e' : '#ef4444'}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <PulsingDot color={statusOk ? '#22c55e' : '#ef4444'} />
+                <span style={{ fontSize: '22px', fontWeight: '700', color: statusOk ? '#166534' : '#991b1b' }}>
+                  {statusOk ? 'OK' : 'NOT OK'}
+                </span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#64748b', lineHeight: '1.5' }}>
+                {(() => {
+                  const info = safeStr(latest.info_status)
+                  if (!info || info === '—') return 'No info'
+                  if (info.includes('CpuTemp')) return 'All systems normal'
+                  return info
+                })()}
+              </div>
+            </StatusCard>
+
+            {/* Internet / Data Connection */}
+            <StatusCard label="Internet Connection" accentColor={isOnline ? '#22c55e' : '#ef4444'}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                <PulsingDot color={isOnline ? '#22c55e' : '#ef4444'} />
+                <span style={{ fontSize: '22px', fontWeight: '700', color: isOnline ? '#166534' : '#991b1b' }}>
+                  {isOnline ? 'Connected' : 'No Connection'}
+                </span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#64748b', lineHeight: '1.5' }}>
+                {minsAgo === null
+                  ? 'No data received yet'
+                  : minsAgo < 1
+                  ? 'Data received just now'
+                  : `Last data ${minsAgo} min ago`}
+                {!isOnline && minsAgo !== null && minsAgo >= 30 && (
+                  <div style={{ marginTop: '4px', color: '#dc2626', fontWeight: '600', fontSize: '11px' }}>
+                    ⚠ No data for {minsAgo} minutes — check PLC and MQTT connection
+                  </div>
+                )}
+              </div>
+            </StatusCard>
+
           </div>
-        )}
 
-        {!histLoading && histData && histData.length === 0 && (
-          <EmptyState icon="📅" title="No records found"
-            message="No records in the selected range. Try widening the date range." />
-        )}
-      </div>
+          {/* ══ ROW 2: Roll Parameters ══ */}
+          <SectionLabel text="Roll Parameters" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '12px' }}>
 
-      {/* ── Last measurement events — single record each ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+            {/* Sensor Temperature — Roll 1 */}
+            <MetricCard
+              label={`Sensor Temp — ${names.r1}`}
+              value={temps.sensor !== null ? temps.sensor : '—'}
+              unit="°C"
+              color={tempColor(temps.sensor, 50, 65)}
+              sub={temps.sensor !== null
+                ? (temps.sensor >= 65 ? '🔴 Critical — check sensor cooling'
+                  : temps.sensor >= 50 ? '🟡 High — monitor closely'
+                  : '🟢 Normal range')
+                : 'No temperature data'}
+            />
 
-        {/* Last Measurement Started */}
-        <div className="card">
-          <SectionHead title="Last Measurement Started" />
-          {recentStarts.length > 0 ? (() => {
-            const e = recentStarts[0]
-            const rollName = e.rollid == 1 ? names.r1 : e.rollid == 2 ? names.r2 : `Roll ${safeStr(e.rollid)}`
-            return (
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-                  <span className="badge-info">Started</span>
-                  <span style={{ fontSize: '13px', fontWeight: '600', color: '#334155' }}>{rollName}</span>
-                </div>
-                <KVRow label="Datetime" value={fmtDt(e.datetime)} mono />
-                <KVRow label="Roll ID"  value={safeStr(e.rollid)} mono />
-                <KVRow label="Device"   value={safeStr(e.sysid)}  mono />
-              </div>
-            )
-          })()
-          : <div style={{ fontSize: '12px', color: '#cbd5e1', padding: '8px 0' }}>No measurement start events found.</div>}
-        </div>
+            {/* Sensor Temperature — Roll 2 */}
+            <MetricCard
+              label={`Sensor Temp — ${names.r2}`}
+              value={temps.sensor !== null ? temps.sensor : '—'}
+              unit="°C"
+              color={tempColor(temps.sensor, 50, 65)}
+              sub={temps.sensor !== null
+                ? (temps.sensor >= 65 ? '🔴 Critical'
+                  : temps.sensor >= 50 ? '🟡 High'
+                  : '🟢 Normal range')
+                : 'No temperature data'}
+            />
 
-        {/* Last Measurement Finished */}
-        <div className="card">
-          <SectionHead title="Last Measurement Finished" />
-          {recentFinished.length > 0 ? (() => {
-            const e = recentFinished[0]
-            const rollName = e.rollid == 1 ? names.r1 : e.rollid == 2 ? names.r2 : `Roll ${safeStr(e.rollid)}`
-            return (
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-                  <span className="badge-ok">Finished</span>
-                  <span style={{ fontSize: '13px', fontWeight: '600', color: '#334155' }}>{rollName}</span>
-                </div>
-                <KVRow label="Datetime" value={fmtDt(e.datetime)} mono />
-                <KVRow label="Roll ID"  value={safeStr(e.rollid)} mono />
-                <KVRow label="Device"   value={safeStr(e.sysid)}  mono />
-              </div>
-            )
-          })()
-          : <div style={{ fontSize: '12px', color: '#cbd5e1', padding: '8px 0' }}>No measurement finish events found.</div>}
-        </div>
-      </div>
+            {/* CPU Temperature (common for both rolls) */}
+            <MetricCard
+              label="CPU Temperature"
+              value={temps.cpu !== null ? temps.cpu : '—'}
+              unit="°C"
+              color={tempColor(temps.cpu, 70, 85)}
+              sub={temps.cpu !== null
+                ? (temps.cpu >= 85 ? '🔴 Critical — check cooling'
+                  : temps.cpu >= 70 ? '🟡 High'
+                  : '🟢 Normal range')
+                : 'No data'}
+            />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '28px' }}>
+
+            {/* RPM — Roll 1 */}
+            <MetricCard
+              label={`RPM — ${names.r1}`}
+              value={r1_rpm !== null ? r1_rpm.toFixed(1) : '—'}
+              unit="rpm"
+              color="#1d6fbd"
+              sub={r1_rpm === null ? 'Waiting for conf=1 data' : 'Rotation speed'}
+            />
+
+            {/* RPM — Roll 2 */}
+            <MetricCard
+              label={`RPM — ${names.r2}`}
+              value={r2_rpm !== null ? r2_rpm.toFixed(1) : '—'}
+              unit="rpm"
+              color="#1d6fbd"
+              sub={r2_rpm === null ? 'Waiting for conf=1 data' : 'Rotation speed'}
+            />
+
+            {/* Radius — Roll 1 */}
+            <MetricCard
+              label={`Radius — ${names.r1}`}
+              value={r1_rad !== null ? r1_rad.toFixed(1) : '—'}
+              unit="mm"
+              color="#8b5cf6"
+              sub={r1_rad === null ? 'Waiting for conf=1 data' : 'Roll radius'}
+            />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '28px' }}>
+
+            {/* Radius — Roll 2 */}
+            <MetricCard
+              label={`Radius — ${names.r2}`}
+              value={r2_rad !== null ? r2_rad.toFixed(1) : '—'}
+              unit="mm"
+              color="#8b5cf6"
+              sub={r2_rad === null ? 'Waiting for conf=1 data' : 'Roll radius'}
+            />
+
+            {/* Steps — Roll 1 */}
+            <MetricCard
+              label={`Steps — ${names.r1}`}
+              value={latest?.r1_n_steps || '—'}
+              unit=""
+              color="#0891b2"
+              sub="Sensor steps along rail"
+            />
+
+            {/* Steps — Roll 2 */}
+            <MetricCard
+              label={`Steps — ${names.r2}`}
+              value={latest?.r2_n_steps || '—'}
+              unit=""
+              color="#0891b2"
+              sub="Sensor steps along rail"
+            />
+          </div>
+
+          {/* ══ Configuration status strip ══ */}
+          <div style={{
+            padding: '14px 20px', borderRadius: '12px', marginBottom: '8px',
+            background: latest.conf ? '#f0fdf4' : '#fffbeb',
+            border: `1px solid ${latest.conf ? '#bbf7d0' : '#fde68a'}`,
+            display: 'flex', alignItems: 'center', gap: '12px',
+          }}>
+            <span style={{
+              fontSize: '11px', fontWeight: '700', padding: '3px 10px', borderRadius: '20px',
+              background: latest.conf ? '#dcfce7' : '#fef9c3',
+              color: latest.conf ? '#166534' : '#854d0e',
+              border: `1px solid ${latest.conf ? '#bbf7d0' : '#fde68a'}`,
+            }}>
+              <PulsingDot color={latest.conf ? '#22c55e' : '#f59e0b'} />
+              {latest.conf ? 'Configuration Valid (conf=1)' : 'Not Configured (conf=0)'}
+            </span>
+            <span style={{ fontSize: '12px', color: '#64748b' }}>
+              {latest.conf
+                ? `Roll parameters received from PLC. RPM, Radius and Steps are live values.`
+                : `PLC has not sent measurement configuration yet. RPM, Radius and Steps show — until conf=1 is received. Go to Roll Control → Apply Configuration.`}
+            </span>
+          </div>
+        </>
+      )}
     </div>
   )
 }

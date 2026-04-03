@@ -9,7 +9,8 @@ import Dashboard   from './pages/Dashboard'
 import RollControl from './pages/RollControl'
 import WearResults from './pages/WearResults'
 import SystemHealth from './pages/SystemHealth'
-import Analytics   from './pages/Analytics'
+import Analytics      from './pages/Analytics'
+import HistoricalData from './pages/HistoricalData'
 import AdminPanel  from './pages/admin/AdminPanel'
 
 // ── Icons ─────────────────────────────────────────────────────
@@ -20,11 +21,13 @@ const Icons = {
   Health:     () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
   Analytics:  () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
   Admin:      () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  History:    () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
   Logout:     () => <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
 }
 
 const NAV = [
   { path: '/',          label: 'Dashboard',     Icon: Icons.Dashboard, desc: 'Live system status',         minRole: 'plant'    },
+  { path: '/history',   label: 'Historical Data', Icon: Icons.History,   desc: 'Status & event history',      minRole: 'plant'    },
   { path: '/control',   label: 'Roll Control',  Icon: Icons.Control,   desc: 'Start / stop / configure',   minRole: 'plant'    },
   { path: '/results',   label: 'Wear Results',  Icon: Icons.Results,   desc: 'Charts & analysis',          minRole: 'plant'    },
   { path: '/analytics', label: 'Analytics',     Icon: Icons.Analytics, desc: 'Wear prediction & alarms',   minRole: 'plant'    },
@@ -190,6 +193,7 @@ function AppRoutes() {
               <Route path="/"          element={<Dashboard />} />
               <Route path="/control"   element={<RollControl />} />
               <Route path="/results"   element={<WearResults />} />
+              <Route path="/history"   element={<HistoricalData />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/health"    element={<SystemHealth />} />
               <Route path="/admin"     element={<ProtectedRoute minRole="admin"><AdminPanel /></ProtectedRoute>} />
