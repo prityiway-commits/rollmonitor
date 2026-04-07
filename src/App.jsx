@@ -28,7 +28,7 @@ const Icons = {
 const NAV = [
   { path: '/',          label: 'Dashboard',     Icon: Icons.Dashboard, desc: 'Live system status',         minRole: 'plant'    },
   { path: '/history',   label: 'Historical Data', Icon: Icons.History,   desc: 'Status & event history',      minRole: 'plant'    },
-  { path: '/control',   label: 'Roll Control',  Icon: Icons.Control,   desc: 'Start / stop / configure',   minRole: 'plant'    },
+  { path: '/control',   label: 'Roller Configuration', Icon: Icons.Control, desc: 'Start / stop / configure',   minRole: 'plant'    },
   { path: '/results',   label: 'Wear Results',  Icon: Icons.Results,   desc: 'Charts & analysis',          minRole: 'plant'    },
   { path: '/analytics', label: 'Analytics',     Icon: Icons.Analytics, desc: 'Wear prediction & alarms',   minRole: 'plant'    },
   { path: '/health',    label: 'System Health', Icon: Icons.Health,    desc: 'Connectivity & events',      minRole: 'plant'    },
@@ -157,11 +157,7 @@ function Layout({ children }) {
               <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#22c55e', animation: 'pulse 2s infinite' }} />
               <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '500' }}>Live</span>
             </div>
-            {user && (
-              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '4px 10px', fontSize: '11px', color: '#1d4ed8', fontWeight: '600', fontFamily: 'monospace' }}>
-                {localStorage.getItem('rollmonitor_sysid') || 'No device'}
-              </div>
-            )}
+
           </div>
         </header>
         <main style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>{children}</main>

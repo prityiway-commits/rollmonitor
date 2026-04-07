@@ -21,10 +21,12 @@ const REFERENCE_KEY = 'rollmonitor_references'
 
 // ── Default settings ─────────────────────────────────────────
 export const DEFAULT_SETTINGS = {
-  threshold:      -50,    // mm — alarm level
-  warningLevel:   -40,    // mm — warning level
-  hoursPerDay:    16,     // operating hours per day
-  daysPerWeek:    5,      // operating days per week
+  threshold:        -50,    // mm — alarm level
+  warningLevel:     -40,    // mm — warning level
+  hoursPerDay:       16,    // operating hours per day
+  daysPerWeek:        5,    // operating days per week
+  rollerLengthR1:  1000,    // mm — physical length of roll 1
+  rollerLengthR2:  1000,    // mm — physical length of roll 2
 }
 
 // ── Settings persistence ──────────────────────────────────────
@@ -70,11 +72,31 @@ export function loadOverhaulLog() {
 
 export function addOverhaul(entry) {
   const log = loadOverhaulLog()
-  const newEntry = { ...entry, id: Date.now().toString() }
+  const newEntry = { ...entry, id: Date.now().toString(), savedAt: new Date().toISOString() }
   log.push(newEntry)
   log.sort((a, b) => new Date(b.date) - new Date(a.date)) // newest first
   localStorage.setItem(OVERHAUL_KEY, JSON.stringify(log))
   return newEntry
+}
+
+export function updateOverhaul(id, updates) {
+  const log = loadOverhaulLog().map(e => e.id === id ? { ...e, ...updates, updatedAt: new Date().toISOString() } : e)
+  log.sort((a, b) => new Date(b.date) - new Date(a.date))
+  localStorage.setItem(OVERHAUL_KEY, JSON.stringify(log))
+  return log
+}
+
+// Compute 11 measurement positions given roller length
+export function computeMeasPositions(rollerLength) {
+  const L = parseFloat(rollerLength) || 1400
+  return Array.from({ length: 11 }, (_, i) => parseFloat((20 + i * (L - 20) / 10).toFixed(1)))
+}
+
+// Compute concavity = max - min diameter
+export function computeConcavity(readings) {
+  const vals = readings.filter(v => v !== null && v !== '' && !isNaN(parseFloat(v))).map(parseFloat)
+  if (vals.length < 2) return null
+  return parseFloat((Math.max(...vals) - Math.min(...vals)).toFixed(2))
 }
 
 export function deleteOverhaul(id) {
@@ -106,7 +128,53 @@ export function parseWearArray(wear_data) {
   }).filter(v => !isNaN(v))
 }
 
-// ── Compute scalar wear from two profiles ────────────────────
+// ── Compute avg(W[i]) for a single record ─────────────────────
+// wear_data is already W[i] = S[i] - C[i] (pre-computed by PLC)
+export function avgWearRecord(rec) {
+  const W = parseWearArray(rec?.wear_data)
+  if (!W.length) return null
+  return W.reduce((s, v) => s + v, 0) / W.length
+}
+
+// ── Group records by calendar date YYYY-MM-DD ──────────────────
+export function groupByDate(records) {
+  const map = {}
+  records.forEach(rec => {
+    const dt = rec.datetime || ''
+    const m  = String(dt).match(/(\d{4}-\d{2}-\d{2})/)
+    if (!m) return
+    const date = m[1]
+    if (!map[date]) map[date] = []
+    map[date].push(rec)
+  })
+  return map
+}
+
+// ── Build daily avg wear time series (Option C) ───────────────
+// For each day: avg(W[i]) across all records and all spos positions
+// Returns: [{ x: daysSinceRef, y: dailyAvgWear, date, label }]
+export function buildDailyAvgWearSeries(records, referenceDate) {
+  if (!records?.length || !referenceDate) return []
+  const refTime = referenceDate.getTime()
+  const byDate  = groupByDate(records)
+
+  return Object.entries(byDate)
+    .map(([date, recs]) => {
+      const dt = new Date(date + 'T12:00:00Z')
+      if (dt < referenceDate) return null
+      const daysSince = (dt.getTime() - refTime) / (1000 * 60 * 60 * 24)
+      // avg W across all records that day
+      const allAvg = recs.map(r => avgWearRecord(r)).filter(v => v !== null)
+      if (!allAvg.length) return null
+      const dailyAvg = allAvg.reduce((s, v) => s + v, 0) / allAvg.length
+      return { x: daysSince, y: parseFloat(dailyAvg.toFixed(4)), date, label: date, nRecs: recs.length }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.x - b.x)
+}
+
+// ── Compute scalar wear from two profiles ─────────────────────
+
 // Returns the minimum (most negative = most worn) difference
 export function computeScalarWear(currentProfile, referenceProfile) {
   if (!currentProfile?.length || !referenceProfile?.length) return null
