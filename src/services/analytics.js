@@ -110,10 +110,14 @@ export function parseDynamoDate(val) {
   if (!val) return null
   const s = String(val)
   try {
-    // "2025-09-29-13:30:44.367" → split on dashes, rejoin with T
-    if (/^\d{4}-\d{2}-\d{2}-\d{2}:/.test(s)) {
-      const parts = s.split('-')
-      return new Date(`${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`)
+    const parts = s.split('-')
+    if (parts.length >= 4 && s.includes(':')) {
+      const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
+      const d = new Date(iso)
+      if (!isNaN(d)) {
+        // PLC timestamps are UTC-5 — add 5 hours to convert to UTC
+        return new Date(d.getTime() + 5 * 60 * 60 * 1000)
+      }
     }
     return new Date(s)
   } catch { return null }

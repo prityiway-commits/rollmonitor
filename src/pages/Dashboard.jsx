@@ -33,7 +33,10 @@ function parseDynamoDate(val) {
     if (parts.length >= 4) {
       const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
       const d = new Date(iso)
-      if (!isNaN(d)) return d
+      if (!isNaN(d)) {
+        // PLC timestamps are UTC-5 — add 5 hours to convert to UTC
+        return new Date(d.getTime() + 5 * 60 * 60 * 1000)
+      }
     }
     const d = new Date(s)
     return isNaN(d) ? null : d
