@@ -14,6 +14,7 @@ import {
   PointElement, LineElement, Title, Tooltip, Legend, Filler
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
+import axios from 'axios'
 import { fetchWearData, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
 import { Spinner, ErrorBanner, EmptyState, SectionHead } from '../components'
@@ -364,7 +365,6 @@ function WearDiffChart({ rollid, sysid, threshold, rollName }) {
     const from  = new Date(fromDate + 'T00:00:00.000Z').toISOString()
     const to    = new Date(toDate   + 'T23:59:59.999Z').toISOString()
     const token = localStorage.getItem('rollmonitor_session_token')
-    const { default: axios } = await import('axios')
     const res = await axios.get(GET_BASE, {
       params:  { sysid, rollid, table: 'RollWearDataTable', from, to },
       headers: token ? { 'X-Session-Token': token } : {},

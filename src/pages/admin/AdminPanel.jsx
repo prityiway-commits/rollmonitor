@@ -128,7 +128,7 @@ export default function AdminPanel() {
   const tabStyle = (t) => ({
     padding: '8px 16px', fontSize: '13px', fontWeight: tab === t ? '600' : '400',
     color: tab === t ? '#1d6fbd' : '#64748b', borderBottom: tab === t ? '2px solid #1d6fbd' : '2px solid transparent',
-    background: 'none', border: 'none', borderBottom: tab === t ? '2px solid #1d6fbd' : '2px solid transparent',
+    background: 'none', border: 'none',
     cursor: 'pointer', fontFamily: 'inherit',
   })
 
