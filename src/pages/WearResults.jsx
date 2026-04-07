@@ -15,7 +15,7 @@ import {
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 import axios from 'axios'
-import { fetchWearData, toArray } from '../services/api'
+import { fetchWearData, fetchDashboard, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
 import { Spinner, ErrorBanner, EmptyState, SectionHead } from '../components'
 import DateRangePicker from '../components/DateRangePicker'
@@ -74,11 +74,16 @@ function groupBySpos(records) {
 }
 
 // Average W arrays across multiple records at same spos
-function avgWatSpos(recs) {
+// ptsPerRot: trim to one full rotation if provided
+function avgWatSpos(recs, ptsPerRot) {
   if (!recs?.length) return []
   const allW = recs.map(r => computeW(r))
-  const len  = Math.max(...allW.map(w => w.length))
-  if (!len) return []
+  const rawLen = Math.max(...allW.map(w => w.length))
+  if (!rawLen) return []
+  // Use ptsPerRot if valid, otherwise use full array
+  const len = (ptsPerRot && ptsPerRot > 0 && ptsPerRot < rawLen)
+    ? ptsPerRot
+    : rawLen
   return Array.from({ length: len }, (_, i) =>
     avg(allW.map(w => w[i]).filter(v => v !== undefined && !isNaN(v)))
   )
@@ -103,6 +108,47 @@ function wearColor(w, absMax) {
     const bl = Math.round(255 * (1 - f * 0.7))
     return `rgb(${r},${g},${bl})`
   }
+}
+
+// ── Physics helpers ──────────────────────────────────────────
+// Parse DynamoDB datetime to JS Date
+function parseDt(val) {
+  if (!val) return null
+  const s = String(val)
+  const parts = s.split('-')
+  if (parts.length >= 4) {
+    const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
+    const d = new Date(iso)
+    if (!isNaN(d)) return d
+  }
+  return null
+}
+
+// Derive sampling rate from sweep records (Hz)
+// = total array points / total time span of sweep
+function deriveSamplingRate(records) {
+  if (records.length < 2) return 311 // fallback
+  const dts = records
+    .map(r => parseDt(r.datetime))
+    .filter(Boolean)
+    .sort((a, b) => a - b)
+  if (dts.length < 2) return 311
+  const totalSecs = (dts[dts.length-1] - dts[0]) / 1000
+  if (totalSecs <= 0) return 311
+  const totalPts = records.reduce((s, r) => s + (parseInt(r.wear_data_array_size) || 1500), 0)
+  return totalPts / totalSecs
+}
+
+// Points per one full rotation given RPM and sampling rate
+function pointsPerRotation(rpm, samplingRate) {
+  if (!rpm || rpm <= 0) return 933 // fallback
+  const secsPerRotation = 60 / rpm
+  return Math.round(secsPerRotation * samplingRate)
+}
+
+// Circumference in mm
+function calcCircumference(radius) {
+  return 2 * Math.PI * (radius || 900)
 }
 
 // ── Stat card ─────────────────────────────────────────────────
@@ -133,7 +179,7 @@ function LastReceived({ dt }) {
 }
 
 // ── Roller Surface Heatmap ────────────────────────────────────
-function RollerHeatmap({ sposSorted, onSposClick, selectedSpos }) {
+function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, ptsPerRot }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
 
@@ -216,7 +262,7 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos }) {
         <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '10px', color: '#94a3b8', width: '55px', textAlign: 'right', paddingRight: '6px' }}>
           <span>{fmt2(sposSorted[sposSorted.length - 1]?.spos)}mm</span>
           <span style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)', fontSize: '10px', color: '#94a3b8', alignSelf: 'center' }}>Axial position spos (mm)</span>
-          <span>{fmt2(sposSorted[0]?.spos)}mm</span>
+          <span>0mm (spos={fmt2(sposSorted[0]?.spos)}mm)</span>
         </div>
 
         {/* Canvas */}
@@ -247,12 +293,12 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos }) {
 
       {/* X axis label */}
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#94a3b8', marginTop: '4px', paddingLeft: '67px', paddingRight: '56px' }}>
-        <span>i=1</span>
-        <span>← Circumferential position (full rotation) →</span>
-        <span>i={nPts}</span>
+        <span>0mm</span>
+        <span>← Circumferential position (one full rotation = {circumference ? circumference.toFixed(0) : '—'}mm) →</span>
+        <span>{circumference ? circumference.toFixed(0) : nPts}mm</span>
       </div>
       <div style={{ fontSize: '11px', color: '#1d4ed8', marginTop: '8px', paddingLeft: '67px' }}>
-        💡 Click any row to highlight and see its circumferential profile below.
+        💡 Click any row to highlight · {ptsPerRot} pts/rotation · circumference = {circumference ? circumference.toFixed(0) : '—'}mm
       </div>
     </div>
   )
@@ -576,7 +622,7 @@ function WearDiffChart({ rollid, sysid, threshold, rollName }) {
 // ── Wear Band Chart (Option C) ────────────────────────────────
 // X = spos (axial), Y = W value (mm)
 // Shows min/avg/max across circumference at each spos
-function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt }) {
+function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt, circumference, ptsPerRot, rpm, radius }) {
   if (!sposSorted.length) return null
 
   const labels = sposSorted.map(r => `${r.spos}mm`)
@@ -683,6 +729,12 @@ function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt }) {
       <div style={{ height: '260px' }}>
         <Line data={data} options={opts} />
       </div>
+      <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px', display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+        <span>Radius: <strong style={{ fontFamily: 'monospace' }}>{radius ? `${radius}mm` : '—'}</strong></span>
+        <span>RPM: <strong style={{ fontFamily: 'monospace' }}>{rpm ? rpm : '—'}</strong></span>
+        <span>Circumference: <strong style={{ fontFamily: 'monospace' }}>{circumference ? `${circumference.toFixed(0)}mm` : '—'}</strong></span>
+        <span>Pts/rotation: <strong style={{ fontFamily: 'monospace' }}>{ptsPerRot || '—'}</strong></span>
+      </div>
       <LastReceived dt={lastDt} />
     </div>
   )
@@ -713,23 +765,39 @@ export default function WearResults() {
     { pollMs: liveMode ? 120000 : null }
   )
 
+  // Fetch StatusTable to get RPM and radius from latest conf=1 record
+  const { data: dashRaw } = useApi(fetchDashboard, [sysid], { pollMs: 60000 })
+  const confRecord = useMemo(() => {
+    const statusList = toArray(dashRaw?.status || dashRaw).filter(r => r.conf == 1)
+    return statusList[0] ?? null
+  }, [dashRaw])
+
+  const radius = safeFloat(rollid === 1 ? confRecord?.r1_rad : confRecord?.r2_rad) || 900
+  const rpm    = safeFloat(rollid === 1 ? confRecord?.r1_rpm : confRecord?.r2_rpm) || 20
+  const circumference = calcCircumference(radius)
+
   const records = toArray(rawData).filter(r => r.sysid && r.sysid !== 'unknown')
   const lastDt  = records.length ? records[0]?.datetime : null
 
   useEffect(() => { setSelectedSpos(null) }, [sysid, rollid])
 
+  // Derive sampling rate from actual data
+  const samplingRate  = useMemo(() => deriveSamplingRate(records), [records])
+  const ptsPerRot     = useMemo(() => pointsPerRotation(rpm, samplingRate), [rpm, samplingRate])
+
   // Build sorted spos → avgW array (spos ascending)
+  // Use only ptsPerRot points per record (= one full rotation)
   const sposSorted = useMemo(() => {
     const byKey = groupBySpos(records)
     return Object.entries(byKey)
       .map(([spos, recs]) => ({
         spos:  parseFloat(spos),
-        avgW:  avgWatSpos(recs),
+        avgW:  avgWatSpos(recs, ptsPerRot),  // trimmed to one rotation
         nRecs: recs.length,
       }))
       .filter(r => r.avgW.length > 0)
       .sort((a, b) => a.spos - b.spos)
-  }, [records])
+  }, [records, ptsPerRot])
 
   // Auto-select first spos if none selected
   useEffect(() => {
@@ -822,6 +890,15 @@ export default function WearResults() {
             <StatCard label="Wear status"   value={alarmLabel}                                    color={alarmColor} sub={`${records.length} records · ${sposSorted.length} spos positions`} />
           </div>
 
+          {/* Physics parameters info strip */}
+          <div style={{ padding: '10px 16px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', fontSize: '12px', color: '#64748b', display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+            <span>📐 Radius: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{radius}mm</strong> {!confRecord && <span style={{ color: '#f59e0b' }}>(default — no conf=1 record)</span>}</span>
+            <span>⚡ RPM: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{rpm}</strong></span>
+            <span>⭕ Circumference: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{circumference.toFixed(0)}mm</strong></span>
+            <span>📊 Pts/rotation: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{ptsPerRot}</strong></span>
+            <span>🔬 Sampling rate: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{samplingRate.toFixed(0)}Hz</strong></span>
+          </div>
+
           {/* ── Section 3: Roller Surface Map + Line chart ── */}
           <div className="card">
             <SectionHead title={`Roller Surface Map — ${rollName}${liveMode ? ' · Live' : ''}`} />
@@ -836,6 +913,8 @@ export default function WearResults() {
               sposSorted={sposSorted}
               onSposClick={setSelectedSpos}
               selectedSpos={selectedSpos}
+              circumference={circumference}
+              ptsPerRot={ptsPerRot}
             />
 
             {/* Wear band chart — min/avg/max across circumference per spos */}
@@ -845,6 +924,10 @@ export default function WearResults() {
               rollName={rollName}
               liveMode={liveMode}
               lastDt={lastDt}
+              circumference={circumference}
+              ptsPerRot={ptsPerRot}
+              rpm={rpm}
+              radius={radius}
             />
 
             <LastReceived dt={lastDt} />
