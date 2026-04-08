@@ -19,15 +19,12 @@ function parseDynamoDate(val) {
     const s = String(val)
     const parts = s.split('-')
     if (parts.length >= 4) {
-      const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
+      // PLC sends UTC time — append Z to parse as UTC
+      const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}Z`
       const d = new Date(iso)
-      if (!isNaN(d)) {
-        // PLC timestamps are UTC-5 — add 5 hours to convert to UTC
-        return new Date(d.getTime() + 5 * 60 * 60 * 1000)
-      }
+      if (!isNaN(d)) return d
     }
-    const d = new Date(s)
-    return isNaN(d) ? null : d
+    return new Date(s)
   } catch { return null }
 }
 
@@ -165,7 +162,7 @@ export default function Dashboard() {
 
   const lastSeenDt  = latest ? parseDynamoDate(latest.datetime) : null
   const minsAgo     = lastSeenDt ? differenceInMinutes(new Date(), lastSeenDt) : null
-  const isConnected = minsAgo !== null && minsAgo < 30
+  const isConnected = minsAgo !== null && minsAgo < 60
   const temps       = latest ? parseTemps(latest.info_status) : { cpu: null, sensor: null }
   const statusOk    = safeStr(latest?.status).toUpperCase() === 'OK'
   const lastDtStr   = fmtDt(latest?.datetime)
@@ -280,7 +277,7 @@ export default function Dashboard() {
               </div>
               {!isConnected && (
                 <div style={{ fontSize: '10px', color: '#ef4444', fontWeight: '600' }}>
-                  No data for {minsAgo} min — check PLC & MQTT
+                  No data for {minsAgo} min (limit: 60 min) — check PLC & MQTT
                 </div>
               )}
               <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>

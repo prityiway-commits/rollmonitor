@@ -120,18 +120,16 @@ function wearColor(w, absMax) {
 }
 
 // ── Physics helpers ──────────────────────────────────────────
-// Parse DynamoDB datetime (UTC-5) to UTC JS Date
+// Parse DynamoDB datetime (UTC) to JS Date
 function parseDt(val) {
   if (!val) return null
   const s = String(val)
   const parts = s.split('-')
   if (parts.length >= 4) {
-    const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}`
+    // PLC sends UTC time — append Z to parse as UTC
+    const iso = `${parts[0]}-${parts[1]}-${parts[2]}T${parts.slice(3).join('-')}Z`
     const d = new Date(iso)
-    if (!isNaN(d)) {
-      // PLC timestamps are UTC-5 — add 5 hours to convert to UTC
-      return new Date(d.getTime() + 5 * 60 * 60 * 1000)
-    }
+    if (!isNaN(d)) return d
   }
   return null
 }
