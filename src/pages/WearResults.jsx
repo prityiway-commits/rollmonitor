@@ -201,76 +201,161 @@ function LastReceived({ dt }) {
 
 const ANGLE_BUCKETS = Array.from({ length: 37 }, (_, i) => i * 10) // 0,10,20...360
 
-function buildHeatmapGrid(sposSorted, ptsPerRot) {
-  // For each spos, compute avg W per angle bucket
-  if (!sposSorted || !sposSorted.length) return []
-  return sposSorted.map(({ spos, avgW }) => {
-    if (!avgW || !avgW.length) return { spos, bucketAvg: {} }
-    const nPts = avgW.length
-    const pts  = ptsPerRot > 0 ? Math.min(ptsPerRot, nPts) : nPts
+// ── Filter & select best record per spos ─────────────────────
+// Skip records where any W[i] > 100mm (bad/corrupt)
+// From valid records at each spos → use latest by datetime
+function selectBestRecords(records) {
+  if (!records || !Array.isArray(records)) return []
 
-    // Accumulate W values per bucket
-    const bucketVals = {}
-    ANGLE_BUCKETS.forEach(b => { bucketVals[b] = [] })
-
-    for (let i = 0; i < pts; i++) {
-      const theta  = (i / pts) * 360          // 0→360°
-      const bucket = Math.round(theta / 10) * 10
-      const clamped = Math.min(360, Math.max(0, bucket))
-      const snapBucket = clamped === 360 ? 0 : clamped // 360° = same as 0°
-      if (bucketVals[snapBucket] !== undefined) {
-        bucketVals[snapBucket].push(avgW[i])
-      }
-    }
-
-    // Average each bucket
-    const bucketAvg = {}
-    ANGLE_BUCKETS.forEach(b => {
-      const vals = bucketVals[b]
-      bucketAvg[b] = vals.length ? vals.reduce((s,v)=>s+v,0)/vals.length : null
-    })
-
-    return { spos, bucketAvg }
+  // Group by spos (rounded to 1 decimal)
+  const bySpos = {}
+  records.forEach(rec => {
+    const spos = Math.round((safeFloat(rec.spos) || 0) * 10) / 10
+    if (!bySpos[spos]) bySpos[spos] = []
+    bySpos[spos].push(rec)
   })
+
+  const result = []
+  Object.entries(bySpos).forEach(([sposStr, recs]) => {
+    // Filter out bad records (any W[i] > 100mm)
+    const valid = recs.filter(rec => {
+      const W = parseWearArr(rec.wear_data)
+      if (!W.length) return false
+      return Math.max(...W) <= 100
+    })
+    if (!valid.length) return
+
+    // Take latest valid record by datetime
+    const latest = valid.sort((a, b) =>
+      String(b.datetime).localeCompare(String(a.datetime))
+    )[0]
+
+    result.push({ spos: parseFloat(sposStr), rec: latest })
+  })
+
+  return result.sort((a, b) => a.spos - b.spos)
 }
 
-function wearColorAngle(w) {
-  if (w === null || w === undefined) return '#f1f5f9' // no data = light grey
-  if (Math.abs(w) < 0.01) return '#e2e8f0' // ~zero = light grey
+// ── Build heatmap grid from best records ──────────────────────
+// Step 1: Map each record's W[i] to 37 angle buckets
+// Step 2: Spike filter — for each (spos, angle) cell with suspicious value,
+//         check W at same angle in spos±2 positions
+//         If |W[spos][angle] - W[spos±2][angle]| < 20mm → REAL → keep
+//         Otherwise → isolated spike → discard (null)
+function buildHeatmapGrid(bestRecords) {
+  if (!bestRecords || !bestRecords.length) return []
+
+  // Step 1: Build raw grid
+  const rawGrid = bestRecords.map(({ spos, rec }) => {
+    const W    = parseWearArr(rec.wear_data)
+    if (!W.length) return { spos, bucketW: {} }
+    const nPts = W.length
+
+    const bucketW = {}
+    ANGLE_BUCKETS.forEach(b => { bucketW[b] = null })
+
+    for (let i = 0; i < nPts; i++) {
+      const theta  = (i / nPts) * 360
+      const bucket = Math.round(theta / 10) * 10
+      const snap   = bucket >= 360 ? 0 : bucket
+      bucketW[snap] = W[i]
+    }
+    return { spos, bucketW, nPts }
+  })
+
+  // Step 2: Spike filter across spos positions
+  // For each (spos, angle) cell with |W| > 30mm:
+  //   Find records within ±2 spos POSITIONS (by array index, not mm distance)
+  //   but skip the immediate neighbours (idx±1) — look at idx±2
+  //   If |W[this] - W[neighbour]| < 20mm → REAL → keep
+  //   If both ±2 neighbours differ by ≥ 20mm → isolated spike → discard
+  const filtered = rawGrid.map((cell, idx) => {
+    const filteredBucketW = {}
+
+    ANGLE_BUCKETS.forEach(angle => {
+      const w = cell.bucketW[angle]
+      if (w === null || w === undefined) {
+        filteredBucketW[angle] = null
+        return
+      }
+
+      // Only filter suspicious high values (> 30mm absolute)
+      if (Math.abs(w) <= 30) {
+        filteredBucketW[angle] = w
+        return
+      }
+
+      // Collect W values at same angle from ±1 to ±5 spos positions
+      const neighbours = []
+      for (let d = 1; d <= 5; d++) {
+        const p = rawGrid[idx - d]?.bucketW?.[angle]
+        const n = rawGrid[idx + d]?.bucketW?.[angle]
+        if (p !== null && p !== undefined) neighbours.push(p)
+        if (n !== null && n !== undefined) neighbours.push(n)
+      }
+
+      if (!neighbours.length) {
+        filteredBucketW[angle] = w // no neighbours to compare → keep
+        return
+      }
+
+      // Compute median of neighbours
+      const sorted = [...neighbours].sort((a, b) => a - b)
+      const mid    = Math.floor(sorted.length / 2)
+      const median = sorted.length % 2 === 0
+        ? (sorted[mid-1] + sorted[mid]) / 2
+        : sorted[mid]
+
+      // If this value is far from median of neighbours → isolated spike → discard
+      if (Math.abs(w - median) >= 20) {
+        filteredBucketW[angle] = null
+        return
+      }
+
+      filteredBucketW[angle] = w
+    })
+
+    return { ...cell, bucketW: filteredBucketW }
+  })
+
+  return filtered
+}
+
+// ── Colour functions ──────────────────────────────────────────
+// W > 0 → Red (wear):    light red → dark red at threshold
+// W < 0 → Blue (buildup):light blue → dark blue at -30mm
+// W = 0 → Light grey
+function wearColorAngle(w, threshold) {
+  if (w === null || w === undefined) return '#f1f5f9'
+  if (Math.abs(w) < 0.1) return '#e2e8f0' // grey at zero
+
+  const thresh = Math.abs(threshold) || 20
   if (w > 0) {
-    // WEAR → Red (surface moved away, bad)
-    const intensity = Math.min(1, w / 10)
-    return `rgb(255,${Math.round(255*(1-intensity*0.8))},${Math.round(255*(1-intensity*0.8))})`
+    // Wear → red shading, darkest at threshold
+    const intensity = Math.min(1, w / thresh)
+    const lightness = Math.round(255 * (1 - intensity * 0.85))
+    return `rgb(255,${lightness},${lightness})`
   } else {
-    // BUILDUP → Blue (material added)
-    const intensity = Math.min(1, -w / 10)
-    const r = Math.round(255 * (1 - intensity * 0.8))
-    const g = Math.round(255 * (1 - intensity * 0.6))
-    return `rgb(${r},${g},255)`
+    // Buildup → blue shading, darkest at -30mm
+    const intensity = Math.min(1, -w / 30)
+    const lightness = Math.round(255 * (1 - intensity * 0.85))
+    return `rgb(${lightness},${lightness},255)`
   }
 }
 
-function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, ptsPerRot, stepSize, rollerLength }) {
+// ── Roller Surface Heatmap ────────────────────────────────────
+function RollerHeatmap({ bestRecords, onSposClick, selectedSpos, threshold, stepSize }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
 
-  const grid = useMemo(() => buildHeatmapGrid(sposSorted, ptsPerRot), [sposSorted, ptsPerRot])
+  const grid = useMemo(() => buildHeatmapGrid(bestRecords), [bestRecords])
 
-  // Compute abs max for colour legend
-  const absMax = useMemo(() => {
-    let mx = 0
-    grid.forEach(({ bucketAvg }) => {
-      Object.values(bucketAvg).forEach(v => { if (v !== null && Math.abs(v) > mx) mx = Math.abs(v) })
-    })
-    return mx || 1
-  }, [grid])
-
-  const nCols = grid.length       // one col per spos
-  const nRows = ANGLE_BUCKETS.length // 37 rows
+  const nCols = grid.length
+  const nRows = ANGLE_BUCKETS.length // 37
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !nCols || !nRows || !grid || !grid.length) return
+    if (!canvas || !nCols || !nRows || !grid.length) return
     const ctx = canvas.getContext('2d')
     const W   = canvas.width
     const H   = canvas.height
@@ -278,15 +363,14 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
     const cH  = H / nRows
     ctx.clearRect(0, 0, W, H)
 
-    grid.forEach(({ spos, bucketAvg }, ci) => {
+    grid.forEach(({ spos, bucketW }, ci) => {
       ANGLE_BUCKETS.forEach((bucket, ri) => {
-        const w = bucketAvg[bucket]
-        ctx.fillStyle = wearColorAngle(w)
+        ctx.fillStyle = wearColorAngle(bucketW[bucket], threshold)
         ctx.fillRect(ci * cW, ri * cH, Math.ceil(cW) + 1, Math.ceil(cH) + 1)
       })
     })
 
-    // Highlight selected spos column
+    // Highlight selected spos
     if (selectedSpos !== null) {
       const ci = grid.findIndex(r => r.spos === selectedSpos)
       if (ci >= 0) {
@@ -295,25 +379,23 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
         ctx.strokeRect(ci * cW + 1, 1, cW - 2, H - 2)
       }
     }
-  }, [grid, selectedSpos, nCols, nRows])
+  }, [grid, selectedSpos, nCols, nRows, threshold])
 
   function getColFromEvent(e) {
     const canvas = canvasRef.current
     if (!canvas || !nCols) return null
-    const rect  = canvas.getBoundingClientRect()
+    const rect   = canvas.getBoundingClientRect()
     const scaleX = canvas.width / rect.width
-    const x      = (e.clientX - rect.left) * scaleX
-    const ci     = Math.floor(x / (canvas.width / nCols))
+    const ci     = Math.floor((e.clientX - rect.left) * scaleX / (canvas.width / nCols))
     return grid[ci] ?? null
   }
 
   function getRowFromEvent(e) {
     const canvas = canvasRef.current
     if (!canvas || !nRows) return null
-    const rect  = canvas.getBoundingClientRect()
+    const rect   = canvas.getBoundingClientRect()
     const scaleY = canvas.height / rect.height
-    const y      = (e.clientY - rect.top) * scaleY
-    const ri     = Math.floor(y / (canvas.height / nRows))
+    const ri     = Math.floor((e.clientY - rect.top) * scaleY / (canvas.height / nRows))
     return ANGLE_BUCKETS[ri] ?? null
   }
 
@@ -323,26 +405,32 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
   }
 
   function handleMouseMove(e) {
-    const col = getColFromEvent(e)
+    const col   = getColFromEvent(e)
     const angle = getRowFromEvent(e)
     if (!col) { setTooltip(null); return }
-    const w = col.bucketAvg[angle]
-    setTooltip({
-      spos: col.spos, angle,
-      w: w !== null ? w.toFixed(3) : 'no data',
-      x: e.clientX, y: e.clientY,
-    })
+    const w = col.bucketW?.[angle]
+    setTooltip({ spos: col.spos, angle, w: w !== null && w !== undefined ? w.toFixed(3) : 'no data', x: e.clientX, y: e.clientY })
   }
 
-  if (!nCols) return <div style={{ padding:'2rem', textAlign:'center', color:'#94a3b8', fontSize:'13px' }}>No data to display</div>
+  if (!nCols) return (
+    <div style={{ padding:'2rem', textAlign:'center', color:'#94a3b8', fontSize:'13px' }}>
+      No valid wear data to display
+    </div>
+  )
+
+  // Compute abs max for legend
+  let maxAbsW = 0
+  grid.forEach(({ bucketW }) => {
+    Object.values(bucketW).forEach(v => { if (v !== null && Math.abs(v) > maxAbsW) maxAbsW = Math.abs(v) })
+  })
 
   return (
     <div>
       <div style={{ display:'flex', gap:'8px', alignItems:'stretch' }}>
-        {/* Y axis — angle labels */}
+        {/* Y axis labels */}
         <div style={{ display:'flex', flexDirection:'column', justifyContent:'space-between', width:'44px', flexShrink:0, paddingRight:'4px' }}>
-          {ANGLE_BUCKETS.filter((_, i) => i % 3 === 0).map(a => (
-            <span key={a} style={{ fontSize:'9px', color:'#94a3b8', textAlign:'right', lineHeight:'1' }}>{a}°</span>
+          {ANGLE_BUCKETS.filter((_, i) => i % 6 === 0).map(a => (
+            <span key={a} style={{ fontSize:'9px', color:'#94a3b8', textAlign:'right' }}>{a}°</span>
           ))}
         </div>
 
@@ -350,7 +438,7 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
         <div style={{ flex:1, position:'relative' }}>
           <canvas
             ref={canvasRef}
-            width={Math.max(nCols * 10, 600)} height={370}
+            width={Math.max(nCols * 12, 600)} height={370}
             style={{ width:'100%', height:'370px', borderRadius:'8px', border:'1px solid #e2e8f0', cursor:'crosshair', display:'block' }}
             onClick={handleClick}
             onMouseMove={handleMouseMove}
@@ -363,17 +451,22 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
           )}
         </div>
 
-        {/* Colour bar */}
-        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', width:'44px', gap:'4px', flexShrink:0 }}>
-          <span style={{ fontSize:'9px', color:'#dc2626', fontWeight:'700' }}>+{absMax.toFixed(1)}</span>
-          <div style={{ flex:1, width:'14px', borderRadius:'4px', background:'linear-gradient(to bottom, rgb(255,50,50), #e2e8f0, rgb(50,50,255))', border:'1px solid #e2e8f0' }} />
-          <span style={{ fontSize:'9px', color:'#1d4ed8', fontWeight:'700' }}>−{absMax.toFixed(1)}</span>
-          <span style={{ fontSize:'8px', color:'#94a3b8' }}>mm</span>
+        {/* Colour legend */}
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', width:'52px', gap:'2px', flexShrink:0 }}>
+          <span style={{ fontSize:'9px', color:'#dc2626', fontWeight:'700' }}>Wear</span>
+          <div style={{ flex:1, width:'14px', borderRadius:'4px', background:'linear-gradient(to bottom, rgb(255,40,40), rgb(255,220,220), #e2e8f0, rgb(220,220,255), rgb(40,40,255))', border:'1px solid #e2e8f0' }} />
+          <span style={{ fontSize:'9px', color:'#1d4ed8', fontWeight:'700' }}>Build</span>
+          <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:'1px', marginTop:'2px' }}>
+            <span style={{ fontSize:'8px', color:'#dc2626' }}>+{fmt2(threshold)}</span>
+            <span style={{ fontSize:'8px', color:'#94a3b8' }}>0</span>
+            <span style={{ fontSize:'8px', color:'#1d4ed8' }}>-30</span>
+          </div>
+          <span style={{ fontSize:'8px', color:'#94a3b8', marginTop:'2px' }}>mm</span>
         </div>
       </div>
 
       {/* X axis */}
-      <div style={{ paddingLeft:'52px', paddingRight:'52px', marginTop:'4px' }}>
+      <div style={{ paddingLeft:'52px', paddingRight:'60px', marginTop:'4px' }}>
         <div style={{ display:'flex', justifyContent:'space-between', fontSize:'9px', color:'#94a3b8' }}>
           {grid.filter((_, i) => i === 0 || i === Math.floor(grid.length/2) || i === grid.length-1).map(r => (
             <span key={r.spos}>{r.spos}mm</span>
@@ -384,27 +477,37 @@ function RollerHeatmap({ sposSorted, onSposClick, selectedSpos, circumference, p
         </div>
       </div>
 
-      <div style={{ fontSize:'11px', color:'#1d4ed8', marginTop:'6px', paddingLeft:'52px' }}>
-        💡 Click any column to see polar plot for that spos position below.
-        {stepSize && <span style={{ color:'#94a3b8', marginLeft:'8px' }}>Step size: {stepSize}mm</span>}
+      <div style={{ fontSize:'11px', color:'#1d4ed8', marginTop:'6px', paddingLeft:'52px', display:'flex', gap:'16px', flexWrap:'wrap' }}>
+        <span>💡 Click column to update polar plot</span>
+        {stepSize && <span style={{ color:'#94a3b8' }}>Step: {stepSize}mm</span>}
+        <span style={{ color:'#94a3b8' }}>{nCols} spos positions</span>
       </div>
     </div>
   )
 }
 
-// ── Wear Band Chart (Option C) ────────────────────────────────
-// X = spos (axial), Y = W value (mm)
-// Shows min/avg/max across circumference at each spos
-function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt, circumference, ptsPerRot, rpm, radius }) {
-  if (!sposSorted || !sposSorted.length) return null
+// ── Wear Band Chart ───────────────────────────────────────────
+// X = spos, Y = W value
+// Shows min/avg/max across all angle buckets per spos
+function WearBandChart({ bestRecords, threshold, rollName, liveMode, lastDt }) {
+  const grid = useMemo(() => buildHeatmapGrid(bestRecords), [bestRecords])
 
-  const labels = sposSorted.map(r => `${r.spos}mm`)
+  if (!grid || !grid.length) return null
 
-  const minW = sposSorted.map(r => r.avgW && r.avgW.length ? parseFloat(Math.min(...r.avgW).toFixed(3)) : 0)
-  const maxW = sposSorted.map(r => r.avgW && r.avgW.length ? parseFloat(Math.max(...r.avgW).toFixed(3)) : 0)
-  const avgWArr = sposSorted.map(r => {
-    const a = avg(r.avgW)
-    return a !== null ? parseFloat(a.toFixed(3)) : null
+  const labels  = grid.map(r => `${r.spos}mm`)
+
+  const minW    = grid.map(r => {
+    const vals = Object.values(r.bucketW).filter(v => v !== null)
+    return vals.length ? parseFloat(Math.min(...vals).toFixed(3)) : null
+  })
+  const maxW    = grid.map(r => {
+    const vals = Object.values(r.bucketW).filter(v => v !== null)
+    return vals.length ? parseFloat(Math.max(...vals).toFixed(3)) : null
+  })
+  const avgWArr = grid.map(r => {
+    const vals = Object.values(r.bucketW).filter(v => v !== null)
+    if (!vals.length) return null
+    return parseFloat((vals.reduce((s,v)=>s+v,0)/vals.length).toFixed(3))
   })
 
   const data = {
@@ -413,46 +516,32 @@ function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt, circ
       {
         label: 'Max W — highest wear (mm)',
         data:  maxW,
-        borderColor:     'rgba(239,68,68,0.8)',
+        borderColor:     'rgba(239,68,68,0.9)',
         backgroundColor: 'rgba(239,68,68,0.08)',
-        borderWidth: 1.5,
-        pointRadius: 2,
-        fill: '-1', // fill to avg
-        tension: 0.3,
-        order: 2,
+        borderWidth: 1.5, pointRadius: 2,
+        fill: '-1', tension: 0.3, order: 2,
       },
       {
         label: 'Avg W (mm)',
         data:  avgWArr,
         borderColor:     '#1d6fbd',
-        backgroundColor: 'rgba(29,111,189,0.15)',
-        borderWidth: 2.5,
-        pointRadius: 3,
-        fill: false,
-        tension: 0.3,
-        order: 0,
+        backgroundColor: 'rgba(29,111,189,0.1)',
+        borderWidth: 2.5, pointRadius: 3,
+        fill: false, tension: 0.3, order: 0,
       },
       {
         label: 'Min W — buildup (mm)',
         data:  minW,
-        borderColor:     'rgba(59,130,246,0.8)',
+        borderColor:     'rgba(59,130,246,0.9)',
         backgroundColor: 'rgba(59,130,246,0.08)',
-        borderWidth: 1.5,
-        pointRadius: 2,
-        fill: '+1', // fill to avg
-        tension: 0.3,
-        order: 1,
+        borderWidth: 1.5, pointRadius: 2,
+        fill: '+1', tension: 0.3, order: 1,
       },
       {
         label: `Threshold (${threshold}mm)`,
         data:  labels.map(() => threshold),
-        borderColor:     '#ef4444',
-        backgroundColor: 'transparent',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        fill: false,
-        borderDash: [4, 3],
-        order: 3,
+        borderColor: '#ef4444', backgroundColor: 'transparent',
+        borderWidth: 1.5, pointRadius: 0, fill: false, borderDash: [4,3], order: 3,
       },
     ],
   }
@@ -460,13 +549,10 @@ function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt, circ
   const opts = {
     responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
     plugins: {
-      legend: {
-        display: true,
-        labels: { color: '#64748b', font: { size: 11 }, boxWidth: 12 },
-      },
+      legend: { display: true, labels: { color:'#64748b', font:{ size:11 }, boxWidth:12 } },
       tooltip: {
-        backgroundColor: '#1e293b', titleColor: '#f1f5f9',
-        bodyColor: '#94a3b8', borderColor: '#334155', borderWidth: 1,
+        backgroundColor:'#1e293b', titleColor:'#f1f5f9', bodyColor:'#94a3b8',
+        borderColor:'#334155', borderWidth:1,
         callbacks: {
           title: items => `spos: ${labels[items[0].dataIndex]}`,
           label: item  => ` ${item.dataset.label}: ${Number(item.raw).toFixed(3)}mm`,
@@ -474,46 +560,31 @@ function WearBandChart({ sposSorted, threshold, rollName, liveMode, lastDt, circ
       },
     },
     scales: {
-      x: {
-        ticks:  { color: '#94a3b8', font: { size: 10 }, maxRotation: 45 },
-        grid:   { color: '#f1f5f9' },
-        title:  { display: true, text: 'Axial position (spos mm)', color: '#94a3b8', font: { size: 11 } },
-      },
-      y: {
-        ticks:  { color: '#94a3b8', font: { size: 10 } },
-        grid:   { color: '#f1f5f9' },
-        title:  { display: true, text: 'W[i] value (mm)', color: '#94a3b8', font: { size: 11 } },
-      },
+      x: { ticks:{ color:'#94a3b8', font:{size:10}, maxRotation:45 }, grid:{ color:'#f1f5f9' },
+           title:{ display:true, text:'Axial position (spos mm)', color:'#94a3b8', font:{size:11} } },
+      y: { ticks:{ color:'#94a3b8', font:{size:10} }, grid:{ color:'#f1f5f9' },
+           title:{ display:true, text:'W value (mm)', color:'#94a3b8', font:{size:11} } },
     },
   }
 
   return (
-    <div style={{ marginTop: '20px', padding: '16px', background: '#f8fafc', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-      <div style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
-        Wear Band — {rollName}{liveMode ? ' · Live' : ''}
+    <div style={{ marginTop:'20px', padding:'16px', background:'#f8fafc', borderRadius:'12px', border:'1px solid #e2e8f0' }}>
+      <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b', marginBottom:'4px' }}>
+        Wear Profile — {rollName}{liveMode ? ' · Live' : ''}
       </div>
-      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '12px', lineHeight: '1.6' }}>
-        X = axial position (spos mm) · Y = W value across circumference ·
-        <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue = max W</span> ·
-        <span style={{ color: '#1d6fbd', fontWeight: '600' }}> Dark blue = avg W</span> ·
-        <span style={{ color: '#dc2626', fontWeight: '600' }}> Red = max W (highest wear)</span> ·
-        Shaded area = circumferential spread
+      <div style={{ fontSize:'11px', color:'#94a3b8', marginBottom:'12px' }}>
+        X = axial position (spos mm) · Y = W value ·
+        <span style={{ color:'#dc2626' }}> Red = max wear</span> ·
+        <span style={{ color:'#1d6fbd' }}> Dark blue = avg</span> ·
+        <span style={{ color:'#3b82f6' }}> Blue = min (buildup)</span>
       </div>
-      <div style={{ height: '260px' }}>
+      <div style={{ height:'260px' }}>
         <Line data={data} options={opts} />
-      </div>
-      <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px', display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-        <span>Radius: <strong style={{ fontFamily: 'monospace' }}>{radius ? `${radius}mm` : '—'}</strong></span>
-        <span>RPM: <strong style={{ fontFamily: 'monospace' }}>{rpm ? rpm : '—'}</strong></span>
-        <span>Circumference: <strong style={{ fontFamily: 'monospace' }}>{circumference ? `${circumference.toFixed(0)}mm` : '—'}</strong></span>
-        <span>Pts/rotation: <strong style={{ fontFamily: 'monospace' }}>{ptsPerRot || '—'}</strong></span>
       </div>
       <LastReceived dt={lastDt} />
     </div>
   )
 }
-
-
 
 // ── Wear Difference chart ─────────────────────────────────────
 function WearDiffChart({ rollid, sysid, threshold, rollName }) {
@@ -693,21 +764,23 @@ function WearDiffChart({ rollid, sysid, threshold, rollName }) {
 }
 
 // ── Polar Plot ────────────────────────────────────────────────
-function PolarPlot({ sposSorted, selectedSpos, radius, ptsPerRot, rollName }) {
+// radius - W[i] because:
+//   W > 0 (wear)    → surface moved away from centre → drawn INSIDE baseline
+//   W < 0 (buildup) → material added to surface     → drawn OUTSIDE baseline
+function PolarPlot({ bestRecords, selectedSpos, radius, rollName, threshold }) {
   const canvasRef = useRef(null)
 
   const row = useMemo(() => {
-    if (!sposSorted || !sposSorted.length) return null
+    if (!bestRecords || !bestRecords.length) return null
     if (selectedSpos !== null) {
-      return sposSorted.find(r => r.spos === selectedSpos) ?? sposSorted[0]
+      return bestRecords.find(r => r.spos === selectedSpos) ?? bestRecords[0]
     }
-    return sposSorted[0]
-  }, [sposSorted, selectedSpos])
+    return bestRecords[0]
+  }, [bestRecords, selectedSpos])
 
-  // Safe values
-  const safeRadius  = (radius && radius > 0) ? radius : 900
-  const safePts     = (ptsPerRot && ptsPerRot > 0) ? ptsPerRot : 933
-  const BUCKETS     = Array.from({ length: 37 }, (_, i) => i * 10)
+  const safeR   = (radius && radius > 0) ? radius : 300
+  const thresh  = Math.abs(threshold) || 20
+  const BUCKETS = Array.from({ length: 37 }, (_, i) => i * 10)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -715,123 +788,172 @@ function PolarPlot({ sposSorted, selectedSpos, radius, ptsPerRot, rollName }) {
     const ctx = canvas.getContext('2d')
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    if (!row || !row.avgW || !row.avgW.length) {
+    if (!row || !row.rec) {
       ctx.fillStyle = '#94a3b8'
       ctx.font = '13px sans-serif'
       ctx.textAlign = 'center'
-      ctx.fillText('No data', canvas.width/2, canvas.height/2)
+      ctx.fillText('No data — click a column on the heatmap', canvas.width/2, canvas.height/2)
       return
     }
 
-    const W   = canvas.width
-    const H   = canvas.height
-    const cx  = W / 2
-    const cy  = H / 2
-    const scale = Math.min(cx, cy) * 0.75 / safeRadius
-    if (!isFinite(scale) || scale <= 0) return
+    try {
+      const W    = parseWearArr(row.rec.wear_data)
+      const nPts = W.length
+      if (!nPts) return
 
-    // Build angle buckets manually (avoid module scope issues)
-    const bucketVals = {}
-    BUCKETS.forEach(b => { bucketVals[b] = [] })
+      const CW   = canvas.width
+      const CH   = canvas.height
+      const cx   = CW / 2
+      const cy   = CH / 2
+      const scale = Math.min(cx, cy) * 0.72 / safeR
 
-    const nPts = Math.min(safePts, row.avgW.length)
-    for (let i = 0; i < nPts; i++) {
-      const theta   = (i / nPts) * 360
-      const bucket  = Math.min(360, Math.max(0, Math.round(theta / 10) * 10))
-      const snap    = bucket === 360 ? 0 : bucket
-      if (bucketVals[snap] !== undefined) {
-        bucketVals[snap].push(row.avgW[i])
+      // Build angle → W mapping (last point in bucket wins)
+      const bucketW = {}
+      BUCKETS.forEach(b => { bucketW[b] = 0 })
+      for (let i = 0; i < nPts; i++) {
+        const theta  = (i / nPts) * 360
+        const bucket = Math.round(theta / 10) * 10
+        const snap   = bucket >= 360 ? 0 : bucket
+        bucketW[snap] = W[i]
       }
-    }
 
-    const bucketAvg = {}
-    BUCKETS.forEach(b => {
-      const vals = bucketVals[b]
-      bucketAvg[b] = vals && vals.length
-        ? vals.reduce((s, v) => s + v, 0) / vals.length
-        : 0
-    })
+      // Helper: get canvas point for angle + radius
+      const pt = (angleDeg, r) => {
+        const rad = (angleDeg - 90) * Math.PI / 180 // 0° at top
+        return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]
+      }
 
-    // Draw ideal circle
-    ctx.beginPath()
-    ctx.arc(cx, cy, safeRadius * scale, 0, 2 * Math.PI)
-    ctx.strokeStyle = '#cbd5e1'
-    ctx.lineWidth   = 1.5
-    ctx.setLineDash([6, 4])
-    ctx.stroke()
-    ctx.setLineDash([])
+      // Draw reference circles (25%, 50%, 75%, 100% of radius)
+      ;[0.25, 0.5, 0.75, 1.0].forEach(f => {
+        ctx.beginPath()
+        ctx.arc(cx, cy, safeR * scale * f, 0, 2 * Math.PI)
+        ctx.strokeStyle = f === 1.0 ? '#94a3b8' : '#e2e8f0'
+        ctx.lineWidth   = f === 1.0 ? 1.5 : 0.5
+        ctx.setLineDash(f === 1.0 ? [6, 4] : [2, 3])
+        ctx.stroke()
+        ctx.setLineDash([])
+      })
 
-    // Draw worn profile
-    ctx.beginPath()
-    let first = true
-    BUCKETS.forEach(angle => {
-      const w   = bucketAvg[angle] ?? 0
-      const r   = Math.max(0, (safeRadius + w) * scale)
-      const rad = (angle * Math.PI) / 180
-      const x   = cx + r * Math.cos(rad)
-      const y   = cy + r * Math.sin(rad)
-      if (first) { ctx.moveTo(x, y); first = false }
-      else ctx.lineTo(x, y)
-    })
-    ctx.closePath()
-    ctx.strokeStyle = '#3b82f6'
-    ctx.lineWidth   = 2
-    ctx.stroke()
-    ctx.fillStyle   = 'rgba(59,130,246,0.07)'
-    ctx.fill()
+      // Draw angle spokes every 30°
+      for (let a = 0; a < 360; a += 30) {
+        const [x1, y1] = pt(a, safeR * scale * 0.25)
+        const [x2, y2] = pt(a, safeR * scale * 1.0)
+        ctx.beginPath()
+        ctx.moveTo(x1, y1)
+        ctx.lineTo(x2, y2)
+        ctx.strokeStyle = '#f1f5f9'
+        ctx.lineWidth   = 0.5
+        ctx.stroke()
+      }
 
-    // Highlight wear zones (W > 0) in red
-    ctx.beginPath()
-    first = true
-    BUCKETS.forEach(angle => {
-      const w = bucketAvg[angle] ?? 0
-      if (w <= 0) { first = true; return }
-      const r   = Math.max(0, (safeRadius + w) * scale)
-      const rad = (angle * Math.PI) / 180
-      const x   = cx + r * Math.cos(rad)
-      const y   = cy + r * Math.sin(rad)
-      if (first) { ctx.moveTo(x, y); first = false }
-      else ctx.lineTo(x, y)
-    })
-    ctx.strokeStyle = '#ef4444'
-    ctx.lineWidth   = 2.5
-    ctx.stroke()
+      // Draw wear profile (red filled, INSIDE baseline for W>0)
+      ctx.beginPath()
+      let first = true
+      BUCKETS.forEach(angle => {
+        const w = bucketW[angle] ?? 0
+        const r = Math.max(safeR * scale * 0.1, (safeR - w) * scale) // radius - W
+        const [x, y] = pt(angle, r)
+        if (first) { ctx.moveTo(x, y); first = false }
+        else ctx.lineTo(x, y)
+      })
+      ctx.closePath()
+      ctx.strokeStyle = '#3b82f6'
+      ctx.lineWidth   = 1.5
+      ctx.stroke()
+      ctx.fillStyle   = 'rgba(59,130,246,0.06)'
+      ctx.fill()
 
-    // Centre dot
-    ctx.beginPath()
-    ctx.arc(cx, cy, 4, 0, 2 * Math.PI)
-    ctx.fillStyle = '#1e293b'
-    ctx.fill()
+      // Shade wear zones (W>0) in red — inside baseline
+      BUCKETS.forEach((angle, idx) => {
+        const w = bucketW[angle] ?? 0
+        if (w <= 0) return
+        const nextAngle = BUCKETS[(idx + 1) % BUCKETS.length]
+        const rWorn = Math.max(0, (safeR - w) * scale)
+        const rBase = safeR * scale
+        const intensity = Math.min(1, w / thresh)
+        const alpha = 0.15 + intensity * 0.55
 
-    // Angle labels
-    ctx.fillStyle  = '#94a3b8'
-    ctx.font       = '11px monospace'
-    ctx.textAlign  = 'center'
-    const labelR   = safeRadius * scale + 18
-    ;[[0,'0°'],[90,'90°'],[180,'180°'],[270,'270°']].forEach(([deg, lbl]) => {
-      const rad = (deg * Math.PI) / 180
-      ctx.fillText(lbl, cx + labelR * Math.cos(rad), cy + labelR * Math.sin(rad) + 4)
-    })
+        ctx.beginPath()
+        const [x1, y1] = pt(angle, rWorn)
+        ctx.moveTo(cx, cy)
+        ctx.arc(cx, cy, rBase, (angle - 90) * Math.PI / 180, (nextAngle - 90) * Math.PI / 180)
+        ctx.arc(cx, cy, rWorn, (nextAngle - 90) * Math.PI / 180, (angle - 90) * Math.PI / 180, true)
+        ctx.closePath()
+        ctx.fillStyle = `rgba(239,68,68,${alpha})`
+        ctx.fill()
+      })
 
-  }, [row, safeRadius, safePts])
+      // Shade buildup zones (W<0) in blue — outside baseline
+      BUCKETS.forEach((angle, idx) => {
+        const w = bucketW[angle] ?? 0
+        if (w >= 0) return
+        const nextAngle = BUCKETS[(idx + 1) % BUCKETS.length]
+        const rBuildup = Math.max(0, (safeR - w) * scale) // safeR - negative = larger
+        const rBase    = safeR * scale
+        const intensity = Math.min(1, -w / 30)
+        const alpha = 0.15 + intensity * 0.55
+
+        ctx.beginPath()
+        ctx.moveTo(cx, cy)
+        ctx.arc(cx, cy, rBuildup, (angle - 90) * Math.PI / 180, (nextAngle - 90) * Math.PI / 180)
+        ctx.arc(cx, cy, rBase, (nextAngle - 90) * Math.PI / 180, (angle - 90) * Math.PI / 180, true)
+        ctx.closePath()
+        ctx.fillStyle = `rgba(59,130,246,${alpha})`
+        ctx.fill()
+      })
+
+      // Redraw baseline on top (clean grey circle)
+      ctx.beginPath()
+      ctx.arc(cx, cy, safeR * scale, 0, 2 * Math.PI)
+      ctx.strokeStyle = '#94a3b8'
+      ctx.lineWidth   = 1.5
+      ctx.setLineDash([6, 4])
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      // Centre dot
+      ctx.beginPath()
+      ctx.arc(cx, cy, 3, 0, 2 * Math.PI)
+      ctx.fillStyle = '#1e293b'
+      ctx.fill()
+
+      // Angle labels
+      ctx.font      = '10px monospace'
+      ctx.fillStyle = '#64748b'
+      ctx.textAlign = 'center'
+      const labelR  = safeR * scale + 16
+      ;[[0,'0°'],[90,'90°'],[180,'180°'],[270,'270°']].forEach(([deg, lbl]) => {
+        const [x, y] = pt(deg, labelR)
+        ctx.fillText(lbl, x, y + 4)
+      })
+
+      // Radius label
+      ctx.fillStyle = '#94a3b8'
+      ctx.font      = '9px monospace'
+      ctx.textAlign = 'left'
+      ctx.fillText(`r=${safeR}mm`, cx + 4, cy - safeR * scale - 4)
+
+    } catch(e) { console.error('PolarPlot error:', e) }
+  }, [row, safeR, thresh])
 
   return (
     <div style={{ marginTop:'20px', padding:'16px', background:'#f8fafc', borderRadius:'12px', border:'1px solid #bfdbfe' }}>
       <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b', marginBottom:'4px' }}>
-        Polar Cross-Section — {rollName} {row ? `at spos = ${row.spos}mm` : ''}
+        Polar Cross-Section — {rollName}{row ? ` · spos=${row.spos}mm` : ''}
       </div>
-      <div style={{ fontSize:'11px', color:'#94a3b8', marginBottom:'12px' }}>
-        Blue = worn profile · Grey dashed = ideal at radius {safeRadius}mm ·
-        Red = wear zones (W&gt;0) · Click heatmap column to change spos
+      <div style={{ fontSize:'11px', color:'#94a3b8', marginBottom:'10px', lineHeight:'1.6' }}>
+        Grey dashed = baseline (r={safeR}mm) ·
+        <span style={{ color:'#dc2626' }}> Red = wear (W&gt;0, inside baseline)</span> ·
+        <span style={{ color:'#3b82f6' }}> Blue = buildup (W&lt;0, outside baseline)</span>
       </div>
       <div style={{ display:'flex', justifyContent:'center' }}>
-        <canvas ref={canvasRef} width={400} height={400}
+        <canvas ref={canvasRef} width={420} height={420}
           style={{ maxWidth:'100%', borderRadius:'8px', border:'1px solid #e2e8f0', background:'#fff' }} />
       </div>
-      <div style={{ display:'flex', justifyContent:'center', gap:'20px', marginTop:'8px', fontSize:'11px', color:'#64748b' }}>
-        <span><span style={{ color:'#3b82f6' }}>■</span> Worn profile</span>
-        <span><span style={{ color:'#cbd5e1' }}>■</span> Ideal circle</span>
-        <span><span style={{ color:'#ef4444' }}>■</span> Wear zones</span>
+      <div style={{ display:'flex', justifyContent:'center', gap:'20px', marginTop:'8px', fontSize:'11px' }}>
+        <span style={{ color:'#94a3b8' }}>── Baseline</span>
+        <span style={{ color:'#dc2626' }}>■ Wear (inside)</span>
+        <span style={{ color:'#3b82f6' }}>■ Buildup (outside)</span>
       </div>
     </div>
   )
@@ -854,16 +976,25 @@ export default function WearResults() {
                                     : (settings.rollerLengthR2 || 1000)
   const rollName     = names['r' + rollid]
 
-  // In live mode: fetch last 4 hours to get enough records for sampling rate derivation
-  const liveFrom = useMemo(() => {
-    const d = new Date(); d.setHours(d.getHours() - 4); return d.toISOString()
-  }, [liveMode]) // eslint-disable-line
+  // In live mode: fetch last 4 hours — use ref to avoid recalculation causing flicker
+  const liveFromRef = useRef(null)
+  useEffect(() => {
+    if (liveMode) {
+      const d = new Date()
+      d.setHours(d.getHours() - 4)
+      liveFromRef.current = d.toISOString()
+    }
+  }, [liveMode])
+
+  // Stable date strings — only recompute when liveMode/from/to actually changes
+  const fromStr = useMemo(() => from?.toISOString(), [from])
+  const toStr   = useMemo(() => to?.toISOString(),   [to])
 
   const { data: rawData, loading, error, refresh } = useApi(
     fetchWearData,
     liveMode
-      ? [sysid, rollid, liveFrom, new Date().toISOString()]
-      : [sysid, rollid, from?.toISOString(), to?.toISOString()],
+      ? [sysid, rollid, liveFromRef.current ?? fromStr, null]
+      : [sysid, rollid, fromStr, toStr],
     { pollMs: liveMode ? 120000 : null }
   )
 
@@ -893,49 +1024,39 @@ export default function WearResults() {
 
   useEffect(() => { setSelectedSpos(null) }, [sysid, rollid])
 
-  // Derive sampling rate from actual data
-  const samplingRate  = useMemo(() => deriveSamplingRate(records), [records])
-  const ptsPerRot     = useMemo(() => pointsPerRotation(rpm, samplingRate), [rpm, samplingRate])
-
-  // Build sorted spos → avgW array (spos ascending)
-  // Use only ptsPerRot points per record (= one full rotation)
-  const sposSorted = useMemo(() => {
-    const byKey = groupBySpos(records)
-    return Object.entries(byKey)
-      .map(([spos, recs]) => ({
-        spos:  parseFloat(spos),
-        avgW:  avgWatSpos(recs, ptsPerRot),  // trimmed to one rotation
-        nRecs: recs.length,
-      }))
-      .filter(r => r.avgW.length > 0)
-      .sort((a, b) => a.spos - b.spos)
-  }, [records, ptsPerRot])
+  // Select best record per spos (filter bad records, take latest valid)
+  const bestRecords = useMemo(() => selectBestRecords(records), [records])
 
   // Auto-select first spos if none selected
   useEffect(() => {
-    if (sposSorted.length > 0 && selectedSpos === null) {
-      setSelectedSpos(sposSorted[0].spos)
+    if (bestRecords.length > 0 && selectedSpos === null) {
+      setSelectedSpos(bestRecords[0].spos)
     }
-  }, [sposSorted])
+  }, [bestRecords])
 
-  // Summary stats
-  // maxWear = highest avg W across all spos (W>0 = wear, increasing = bad)
-  const maxWear = sposSorted.length
-    ? Math.max(...sposSorted.map(r => avg(r.avgW)).filter(v => v !== null))
-    : null
+  // Summary stats from bestRecords
+  const maxWear = useMemo(() => {
+    if (!bestRecords.length) return null
+    const allW = []
+    bestRecords.forEach(({ rec }) => {
+      const W = parseWearArr(rec.wear_data)
+      allW.push(...W.filter(v => !isNaN(v)))
+    })
+    return allW.length ? Math.max(...allW) : null
+  }, [bestRecords])
 
-  // Latest spos = spos from the most recently received record (by datetime)
+  // Latest spos = spos from the most recently received record by datetime
   const latestSpos = useMemo(() => {
     if (!records.length) return null
     const sorted = [...records].sort((a, b) => {
       const da = parseDt(a.datetime), db = parseDt(b.datetime)
       if (!da || !db) return 0
-      return db - da // newest first
+      return db - da
     })
     return safeFloat(sorted[0]?.spos)
   }, [records])
 
-  const warnLevel  = threshold * 0.9  // e.g. 45mm if threshold=50mm
+  const warnLevel  = threshold * 0.9
   const alarmColor = maxWear === null ? '#94a3b8'
     : maxWear >= threshold  ? '#ef4444'
     : maxWear >= warnLevel  ? '#f59e0b' : '#22c55e'
@@ -955,11 +1076,9 @@ export default function WearResults() {
               style={{ fontSize: '12px', padding: '7px 14px' }}>
               {liveMode ? '⏹ Stop Live' : '▶ Go Live'}
             </button>
-            {!liveMode && (
-              <button className="btn-primary" style={{ fontSize: '12px', padding: '7px 14px' }} onClick={refresh}>
-                {loading ? <Spinner size="sm" /> : '↻ Load Data'}
-              </button>
-            )}
+            <button className="btn-primary" style={{ fontSize: '12px', padding: '7px 14px' }} onClick={refresh}>
+              {loading ? <Spinner size="sm" /> : '↻ Refresh'}
+            </button>
           </div>
         } />
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: '20px' }}>
@@ -1001,24 +1120,27 @@ export default function WearResults() {
           message={`No RollWearData records for ${rollName} in the selected date range.`} />
       )}
 
-      {!loading && records.length > 0 && (
+      {!loading && records.length > 0 && bestRecords.length === 0 && (
+        <EmptyState icon="⚠️" title="All records filtered out"
+          message="All records for this range contain invalid data (W > 100mm). Try a different date range." />
+      )}
+
+      {!loading && bestRecords.length > 0 && (
         <>
           {/* ── Section 2: Summary cards ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '14px' }}>
-            <StatCard label="Latest spos"   value={latestSpos !== null ? fmt2(latestSpos) : '—'} unit="mm"  color="#3b82f6" sub="Furthest axial position reached" />
+            <StatCard label="Latest spos"   value={latestSpos !== null ? fmt2(latestSpos) : '—'} unit="mm"  color="#3b82f6" sub="Most recently received spos" />
             <StatCard label="Max wear (highest W)"      value={maxWear !== null ? fmt2(maxWear) : '—'}        unit="mm"  color={alarmColor} sub="Min avg(W) across all spos" />
             <StatCard label="Threshold set" value={threshold}                                     unit="mm"  color="#ef4444" sub={`Warning at ${fmt2(threshold * 0.9)}mm`} />
-            <StatCard label="Wear status"   value={alarmLabel}                                    color={alarmColor} sub={`${records.length} records · ${sposSorted.length} spos positions`} />
+            <StatCard label="Wear status"   value={alarmLabel}                                    color={alarmColor} sub={`${records.length} records · ${bestRecords.length} spos positions`} />
           </div>
 
           {/* Physics parameters info strip */}
           <div style={{ padding: '10px 16px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', fontSize: '12px', color: '#64748b', display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
             <span>📐 Radius: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{radius}mm</strong> {!confRecord && !measConfig && <span style={{ color: '#f59e0b' }}>(default — apply config first)</span>}</span>
-            <span>⚡ RPM: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{rpm}</strong></span>
             <span>📏 Step: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{stepSize}mm</strong></span>
-            <span>⭕ Circumference: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{circumference.toFixed(0)}mm</strong></span>
-            <span>📊 Pts/rotation: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{ptsPerRot}</strong></span>
-            <span>🔬 Sampling rate: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{samplingRate.toFixed(0)}Hz</strong></span>
+            <span>📊 Valid records: <strong style={{ fontFamily: 'monospace', color: '#1e293b' }}>{bestRecords.length}</strong> spos positions</span>
+            <span>🚫 Filtered: <strong style={{ fontFamily: 'monospace', color: '#94a3b8' }}>{records.length - bestRecords.length}</strong> bad records</span>
           </div>
 
           {/* ── Section 3: Roller Surface Map + Line chart ── */}
@@ -1032,35 +1154,29 @@ export default function WearResults() {
             </div>
 
             <RollerHeatmap
-              sposSorted={sposSorted}
+              bestRecords={bestRecords}
               onSposClick={setSelectedSpos}
               selectedSpos={selectedSpos}
-              circumference={circumference}
-              ptsPerRot={ptsPerRot}
+              threshold={threshold}
               stepSize={stepSize}
-              rollerLength={rollerLength}
             />
 
             {/* Polar Plot */}
             <PolarPlot
-              sposSorted={sposSorted}
+              bestRecords={bestRecords}
               selectedSpos={selectedSpos}
               radius={radius}
-              ptsPerRot={ptsPerRot}
+              threshold={threshold}
               rollName={rollName}
             />
 
             {/* Wear band chart — min/avg/max across circumference per spos */}
             <WearBandChart
-              sposSorted={sposSorted}
+              bestRecords={bestRecords}
               threshold={threshold}
               rollName={rollName}
               liveMode={liveMode}
               lastDt={lastDt}
-              circumference={circumference}
-              ptsPerRot={ptsPerRot}
-              rpm={rpm}
-              radius={radius}
             />
 
             <LastReceived dt={lastDt} />
