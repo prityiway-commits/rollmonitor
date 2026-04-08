@@ -482,7 +482,7 @@ export default function RollControl() {
   const handleAction = useCallback(async (type, rollid) => {
     setLastError(null)
     let res
-    if (type === 'start') res = await postMeasStart(sysid, rollid)
+    if (type === 'start') res = await postMeasStart(sysid)
     else                  res = await postMeasStop(sysid)
     if (res?.error) { toast.error(res.error); return false }
     return true

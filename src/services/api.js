@@ -162,8 +162,9 @@ export function postMeasConfig(config) {
   return safePost({ topic: 'MeasConfig', payload })
 }
 
-export function postMeasStart(sysid, rollid) {
-  return safePost({ topic: 'MeasStart', payload: { sysid, rollid } })
+export function postMeasStart(sysid) {
+  // PLC only needs sysid — no rollid required
+  return safePost({ topic: 'MeasStart', payload: { sysid: String(sysid) } })
 }
 
 export function postMeasStop(sysid) {
