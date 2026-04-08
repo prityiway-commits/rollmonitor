@@ -13,18 +13,6 @@ function safeStr(val) {
   return String(val)
 }
 
-function fmtDt(val) {
-  if (!val) return '—'
-  const s = String(val).replace('T', ' ')
-  // Convert "2026-02-04-14:01:31" → "14:01 04-02-2026"
-  const match = s.match(/(\d{4})-(\d{2})-(\d{2})[-\s](\d{2}):(\d{2})/)
-  if (match) {
-    const [, yyyy, mm, dd, hh, min] = match
-    return `${hh}:${min} ${dd}-${mm}-${yyyy}`
-  }
-  return s.slice(0, 16)
-}
-
 function parseDynamoDate(val) {
   if (!val) return null
   try {
@@ -41,6 +29,21 @@ function parseDynamoDate(val) {
     const d = new Date(s)
     return isNaN(d) ? null : d
   } catch { return null }
+}
+
+function fmtDt(val) {
+  if (!val) return '—'
+  // Parse the raw DynamoDB string then display in browser local timezone
+  const d = parseDynamoDate(val)
+  if (d) {
+    const hh  = String(d.getHours()).padStart(2, '0')
+    const min = String(d.getMinutes()).padStart(2, '0')
+    const dd  = String(d.getDate()).padStart(2, '0')
+    const mm  = String(d.getMonth() + 1).padStart(2, '0')
+    const yyyy = d.getFullYear()
+    return `${hh}:${min} ${dd}-${mm}-${yyyy}`
+  }
+  return String(val).slice(0, 16)
 }
 
 function parseTemps(info_status) {

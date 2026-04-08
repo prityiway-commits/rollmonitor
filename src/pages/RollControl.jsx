@@ -497,8 +497,19 @@ export default function RollControl() {
   async function executeConfig() {
     setLoading(true); setLastError(null)
     const res = await postMeasConfig({ sysid, ...config })
-    if (res?.error) { setLastError(res.error); toast.error(res.error) }
-    else            { toast.success('Configuration applied successfully.') }
+    if (res?.error) {
+      setLastError(res.error)
+      toast.error(res.error)
+    } else {
+      toast.success('Configuration applied successfully.')
+      // Save config to localStorage so WearResults can read step, rpm, rad
+      try {
+        localStorage.setItem(
+          `rollmonitor_measconfig_${sysid}`,
+          JSON.stringify({ ...config, sysid, savedAt: new Date().toISOString() })
+        )
+      } catch {}
+    }
     setLoading(false)
     setModal({ type: null, open: false })
   }

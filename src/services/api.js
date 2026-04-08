@@ -139,7 +139,27 @@ export function fetchMeasFinished(sysid, fromISO, toISO) {
 // ============================================================
 
 export function postMeasConfig(config) {
-  return safePost({ topic: 'MeasConfig', payload: config })
+  // Ensure all numeric fields are proper floats (not strings from form inputs)
+  // PLC expects exact format: {"sysid":"...","r1_min_d":200.0,...}
+  const payload = {
+    sysid:      String(config.sysid),
+    r1_min_d:   parseFloat(config.r1_min_d),
+    r1_max_d:   parseFloat(config.r1_max_d),
+    r1_pos:     parseFloat(config.r1_pos),
+    r1_n_steps: parseInt(config.r1_n_steps, 10),
+    r1_step:    parseFloat(config.r1_step),
+    r1_rad:     parseFloat(config.r1_rad),
+    r1_rpm:     parseFloat(config.r1_rpm),
+    r2_min_d:   parseFloat(config.r2_min_d),
+    r2_max_d:   parseFloat(config.r2_max_d),
+    r2_pos:     parseFloat(config.r2_pos),
+    r2_n_steps: parseInt(config.r2_n_steps, 10),
+    r2_step:    parseFloat(config.r2_step),
+    r2_rad:     parseFloat(config.r2_rad),
+    r2_rpm:     parseFloat(config.r2_rpm),
+  }
+  console.log('[MeasConfig] Sending to PLC:', JSON.stringify(payload))
+  return safePost({ topic: 'MeasConfig', payload })
 }
 
 export function postMeasStart(sysid, rollid) {

@@ -21,8 +21,8 @@ const REFERENCE_KEY = 'rollmonitor_references'
 
 // ── Default settings ─────────────────────────────────────────
 export const DEFAULT_SETTINGS = {
-  threshold:        -50,    // mm — alarm level
-  warningLevel:     -40,    // mm — warning level
+  threshold:        50,     // mm — alarm level (positive: W>0 = wear)
+  warningLevel:     45,     // mm — warning level (90% of threshold)
   hoursPerDay:       16,    // operating hours per day
   daysPerWeek:        5,    // operating days per week
   rollerLengthR1:  1000,    // mm — physical length of roll 1
@@ -246,8 +246,8 @@ export function predictWear(wearTimeSeries, settings, hoursPerDay) {
   const hpd = hoursPerDay || settings.hoursPerDay || 16
 
   const regression = linearRegression(wearTimeSeries)
-  if (!regression || regression.slope >= 0) {
-    // No wear trend or improving — return current state
+  if (!regression || regression.slope <= 0) {
+    // No wear trend or wear decreasing — return current state as stable
     const latest = wearTimeSeries[wearTimeSeries.length - 1]
     return {
       currentWear:      latest.y,
@@ -268,6 +268,7 @@ export function predictWear(wearTimeSeries, settings, hoursPerDay) {
   const currentWear = slope * latestX + intercept
 
   // Days until threshold: threshold = slope * (latestX + daysLeft) + intercept
+  // Wear increasing: days until W reaches threshold
   const daysToThreshold  = (threshold - currentWear) / slope
   const hoursToThreshold = daysToThreshold * hpd
 
@@ -275,8 +276,8 @@ export function predictWear(wearTimeSeries, settings, hoursPerDay) {
     ? new Date(Date.now() + daysToThreshold * 24 * 60 * 60 * 1000)
     : null
 
-  const status = currentWear <= threshold   ? 'critical'
-               : currentWear <= warningLevel ? 'warning'
+  const status = currentWear >= threshold   ? 'critical'
+               : currentWear >= warningLevel ? 'warning'
                : daysToThreshold < 30        ? 'caution'
                : 'good'
 

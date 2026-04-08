@@ -120,6 +120,7 @@ export default function Analytics() {
     : prediction.status === 'critical' ? '#ef4444'
     : prediction.status === 'warning'  ? '#f59e0b'
     : prediction.status === 'caution'  ? '#f59e0b'
+    : prediction.status === 'stable'   ? '#3b82f6'
     : '#22c55e'
 
   const statusLabel = !prediction ? '—'
@@ -257,14 +258,14 @@ export default function Analytics() {
         } />
 
         <div style={{ padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', fontSize: '12px', color: '#92400e', marginBottom: '14px' }}>
-          ⚠ Set the <strong>Wear Threshold</strong> to your plant-specific value before using predictions. Default is −50mm but each plant may differ (e.g. −20mm to −50mm).
+          ⚠ Set the <strong>Wear Threshold</strong> to your plant-specific value before using predictions. Default is 50mm but each plant may differ (e.g. 20mm to 50mm). Wear increases positively — alarm triggers when avg(W) ≥ threshold.
         </div>
 
         {editSettings ? (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
             {[
-              ['threshold',    'Wear threshold (mm)',     -200,  -1],
-              ['warningLevel', 'Warning level (mm)',      -200,  -1],
+              ['threshold',    'Wear threshold (mm)',     1,  500],
+              ['warningLevel', 'Warning level (mm)',      1,  500],
               ['hoursPerDay',  'Operating hrs/day',          1,  24],
               ['daysPerWeek',  'Operating days/week',         1,   7],
               ['rollerLengthR1', `Roller length ${names.r1} (mm)`, 100, 10000],
@@ -272,8 +273,8 @@ export default function Analytics() {
             ].map(([key, label, min, max]) => (
               <div key={key}>
                 <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '600', marginBottom: '5px' }}>{label}</div>
-                <input type="number" min={min} max={max} value={settingsDraft[key] ?? ''}
-                  onChange={e => setDraft(p => ({ ...p, [key]: parseFloat(e.target.value) }))}
+                <input type="number" min={min} max={max} value={settingsDraft[key] !== undefined && !isNaN(settingsDraft[key]) ? settingsDraft[key] : ''}
+                  onChange={e => { const v = parseFloat(e.target.value); setDraft(p => ({ ...p, [key]: isNaN(v) ? '' : v })) }}
                   className="input-field" style={{ fontFamily: 'monospace' }} />
               </div>
             ))}
@@ -396,7 +397,7 @@ export default function Analytics() {
               label="Days to threshold" icon="⏱"
               value={prediction?.daysToThreshold > 0 ? fmt1(prediction.daysToThreshold) : prediction ? 'Exceeded' : '—'}
               unit={prediction?.daysToThreshold > 0 ? 'days' : ''}
-              color={prediction?.daysToThreshold > 0 && prediction.daysToThreshold < 30 ? '#ef4444' : '#22c55e'}
+              color={!prediction?.daysToThreshold ? '#3b82f6' : prediction.daysToThreshold < 30 ? '#ef4444' : '#22c55e'}
               sub={prediction?.predictedDate ? `Est. shutdown: ${fmtDate(prediction.predictedDate)}` : '—'}
             />
             <KpiCard
