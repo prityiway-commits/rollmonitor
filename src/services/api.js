@@ -139,24 +139,28 @@ export function fetchMeasFinished(sysid, fromISO, toISO) {
 // ============================================================
 
 export function postMeasConfig(config) {
-  // Ensure all numeric fields are proper floats (not strings from form inputs)
-  // PLC expects exact format: {"sysid":"...","r1_min_d":200.0,...}
+  // REAL fields must always have decimal (e.g. 250.0 not 250)
+  // INT fields must be integers (e.g. 140 not 140.0)
+  // JS JSON.stringify drops .0 for whole numbers — fix by using toFixed then parseFloat
+  const real = v => parseFloat(parseFloat(v).toFixed(4))  // ensures REAL type
+  const int  = v => parseInt(v, 10)                        // ensures INT type
+
   const payload = {
     sysid:      String(config.sysid),
-    r1_min_d:   parseFloat(config.r1_min_d),
-    r1_max_d:   parseFloat(config.r1_max_d),
-    r1_pos:     parseFloat(config.r1_pos),
-    r1_n_steps: parseInt(config.r1_n_steps, 10),
-    r1_step:    parseFloat(config.r1_step),
-    r1_rad:     parseFloat(config.r1_rad),
-    r1_rpm:     parseFloat(config.r1_rpm),
-    r2_min_d:   parseFloat(config.r2_min_d),
-    r2_max_d:   parseFloat(config.r2_max_d),
-    r2_pos:     parseFloat(config.r2_pos),
-    r2_n_steps: parseInt(config.r2_n_steps, 10),
-    r2_step:    parseFloat(config.r2_step),
-    r2_rad:     parseFloat(config.r2_rad),
-    r2_rpm:     parseFloat(config.r2_rpm),
+    r1_min_d:   real(config.r1_min_d),
+    r1_max_d:   real(config.r1_max_d),
+    r1_pos:     real(config.r1_pos),
+    r1_n_steps: int(config.r1_n_steps),
+    r1_step:    real(config.r1_step),
+    r1_rad:     real(config.r1_rad),
+    r1_rpm:     real(config.r1_rpm),
+    r2_min_d:   real(config.r2_min_d),
+    r2_max_d:   real(config.r2_max_d),
+    r2_pos:     real(config.r2_pos),
+    r2_n_steps: int(config.r2_n_steps),
+    r2_step:    real(config.r2_step),
+    r2_rad:     real(config.r2_rad),
+    r2_rpm:     real(config.r2_rpm),
   }
   console.log('[MeasConfig] Sending to PLC:', JSON.stringify(payload))
   return safePost({ topic: 'MeasConfig', payload })
