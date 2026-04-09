@@ -8,7 +8,6 @@ import Login       from './pages/Login'
 import Dashboard   from './pages/Dashboard'
 import RollControl from './pages/RollControl'
 import WearResults from './pages/WearResults'
-import SystemHealth from './pages/SystemHealth'
 import Analytics      from './pages/Analytics'
 import HistoricalData from './pages/HistoricalData'
 import AdminPanel  from './pages/admin/AdminPanel'
@@ -27,11 +26,9 @@ const Icons = {
 
 const NAV = [
   { path: '/',          label: 'Dashboard',     Icon: Icons.Dashboard, desc: 'Live system status',         minRole: 'plant'    },
-  { path: '/history',   label: 'Historical Data', Icon: Icons.History,   desc: 'Status & event history',      minRole: 'plant'    },
-  { path: '/control',   label: 'Roller Configuration', Icon: Icons.Control, desc: 'Start / stop / configure',   minRole: 'plant'    },
   { path: '/results',   label: 'Wear Results',  Icon: Icons.Results,   desc: 'Charts & analysis',          minRole: 'plant'    },
+  { path: '/control',   label: 'Configuration', Icon: Icons.Control,   desc: 'Roller configuration',       minRole: 'plant'    },
   { path: '/analytics', label: 'Analytics',     Icon: Icons.Analytics, desc: 'Wear prediction & alarms',   minRole: 'plant'    },
-  { path: '/health',    label: 'System Health', Icon: Icons.Health,    desc: 'Connectivity & events',      minRole: 'plant'    },
   { path: '/admin',     label: 'Admin Panel',   Icon: Icons.Admin,     desc: 'Users & org management',     minRole: 'admin'    },
 ]
 
@@ -191,7 +188,6 @@ function AppRoutes() {
               <Route path="/results"   element={<WearResults />} />
               <Route path="/history"   element={<HistoricalData />} />
               <Route path="/analytics" element={<Analytics />} />
-              <Route path="/health"    element={<SystemHealth />} />
               <Route path="/admin"     element={<ProtectedRoute minRole="admin"><AdminPanel /></ProtectedRoute>} />
             </Routes>
           </Layout>

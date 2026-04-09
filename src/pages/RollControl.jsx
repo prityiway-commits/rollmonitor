@@ -24,6 +24,20 @@ const DEFAULT_CONFIG = {
   r2_step:  2.5, r2_rad:  1000, r2_rpm:  19,
 }
 
+const CONFIG_KEY = sysid => `rollmonitor_measconfig_${sysid}`
+
+function loadSavedConfig(sysid) {
+  try {
+    const s = localStorage.getItem(CONFIG_KEY(sysid))
+    if (s) {
+      const saved = JSON.parse(s)
+      // Merge with defaults to ensure all keys exist
+      return { ...DEFAULT_CONFIG, ...saved }
+    }
+  } catch {}
+  return { ...DEFAULT_CONFIG }
+}
+
 const SCHEDULE_KEY = (sysid) => `rollmonitor_schedule_${sysid}`
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -468,10 +482,15 @@ function ScheduleSection({ sysid, onScheduledAction }) {
 export default function RollControl() {
   const [sysid, setSysId]           = useSysId()
   const { names, updateName }       = useRollNames()
-  const [config,    setConfig]      = useState(DEFAULT_CONFIG)
+  const [config,    setConfig]      = useState(() => loadSavedConfig(sysid))
   const [modal,     setModal]       = useState({ type: null, open: false })
   const [loading,   setLoading]     = useState(false)
   const [lastError, setLastError]   = useState(null)
+
+  // Save config to localStorage when sysid changes — load saved config
+  useEffect(() => {
+    setConfig(loadSavedConfig(sysid))
+  }, [sysid])
 
   const handleChange = e => {
     const { name, value } = e.target
@@ -543,29 +562,7 @@ export default function RollControl() {
 
       <ErrorBanner message={lastError} />
 
-      {/* ── Section 2: Measurement Control ── */}
-      <div className="card">
-        <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b', marginBottom:'4px' }}>
-          Measurement Control
-        </div>
-        <p style={{ fontSize:'13px', color:'#94a3b8', marginBottom:'16px', lineHeight:'1.6' }}>
-          Use the buttons below to start or stop measurements per roll.
-          The PLC confirms via <code style={{ background:'#f1f5f9', padding:'1px 6px', borderRadius:'4px', fontSize:'12px' }}>RollWearMeasStarted</code> MQTT message.
-        </p>
-        <div style={{ padding:'10px 14px', background:'#fffbeb', border:'1px solid #fde68a',
-          borderRadius:'8px', fontSize:'12px', color:'#92400e', marginBottom:'16px' }}>
-          <strong>Safety:</strong> Ensure roll is free of obstructions before starting.
-        </div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'16px' }}>
-          <RollCard rollKey="r1" rollid={1} sysid={sysid} names={names} updateName={updateName} onAction={handleAction} />
-          <RollCard rollKey="r2" rollid={2} sysid={sysid} names={names} updateName={updateName} onAction={handleAction} />
-        </div>
-      </div>
-
-      {/* ── Section 3: Schedule Measurement ── */}
-      <ScheduleSection sysid={sysid} onScheduledAction={handleScheduledAction} />
-
-      {/* ── Section 4: System Configuration ── */}
+      {/* ── System Configuration ── */}
       <div className="card">
         <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b', marginBottom:'4px' }}>
           System Configuration

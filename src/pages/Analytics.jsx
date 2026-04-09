@@ -68,8 +68,8 @@ export default function Analytics() {
   const [editSettings, setEditSettings] = useState(false)
   const [settingsDraft, setDraft]       = useState(loadSettings)
 
-  const threshold    = settings.threshold    || -50
-  const warningLevel = settings.warningLevel || -40
+  const threshold    = settings.threshold    ?? 50
+  const warningLevel = settings.warningLevel ?? 45
 
   function saveSettingsHandler() {
     saveSettings(settingsDraft)
