@@ -24,7 +24,7 @@ import {
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 import axios from 'axios'
-import { fetchWearData, fetchMeasStarted, fetchMeasFinished, toArray } from '../services/api'
+import { fetchWearData, fetchMeasStarted, fetchMeasFinished, postMeasStart, postMeasStop, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
 import { Spinner, ErrorBanner, SectionHead } from '../components'
 import SysIdSelector, { useSysId } from '../components/SysIdSelector'
@@ -49,6 +49,31 @@ function parseDt(val) {
     if (!isNaN(d)) return d
   }
   return null
+}
+
+// Parse stop datetime — handles epoch ms (number from IoT timestamp())
+// OR string format from DynamoDB
+function parseStopDt(val) {
+  if (!val) return 0
+  // If it's a number or numeric string → epoch milliseconds
+  const num = Number(val)
+  if (!isNaN(num) && num > 1000000000000) return num  // epoch ms
+  // Otherwise parse as string datetime
+  const d = parseDt(String(val))
+  return d ? d.getTime() : 0
+}
+
+function fmtStopDt(val) {
+  if (!val) return '—'
+  const ms = parseStopDt(val)
+  if (!ms) return '—'
+  const d = new Date(ms)
+  const hh  = String(d.getHours()).padStart(2, '0')
+  const min = String(d.getMinutes()).padStart(2, '0')
+  const dd  = String(d.getDate()).padStart(2, '0')
+  const mm  = String(d.getMonth() + 1).padStart(2, '0')
+  const yyyy = d.getFullYear()
+  return `${hh}:${min} ${dd}-${mm}-${yyyy}`
 }
 
 function fmtDt(val) {
@@ -334,6 +359,28 @@ export default function WearResults() {
   const settings     = loadSettings()
   const rollerLength = rollid === 1 ? (settings.rollerLengthR1 || 1000) : (settings.rollerLengthR2 || 1000)
 
+  // Start / Stop measurement
+  const [actionLoading, setActionLoading] = useState(false)
+  const [actionMsg,     setActionMsg]     = useState(null)
+
+  async function handleStart() {
+    setActionLoading(true); setActionMsg(null)
+    const res = await postMeasStart(sysid)
+    if (res?.error) setActionMsg({ type: 'error', text: res.error })
+    else { setActionMsg({ type: 'success', text: 'Measurement started' }); refreshStarted() }
+    setActionLoading(false)
+    setTimeout(() => setActionMsg(null), 3000)
+  }
+
+  async function handleStop() {
+    setActionLoading(true); setActionMsg(null)
+    const res = await postMeasStop(sysid)
+    if (res?.error) setActionMsg({ type: 'error', text: res.error })
+    else { setActionMsg({ type: 'success', text: 'Measurement stopped' }); refreshFinished() }
+    setActionLoading(false)
+    setTimeout(() => setActionMsg(null), 3000)
+  }
+
   // ── Mode: live or historical ──────────────────────────────
   const [mode, setMode]     = useState('live') // 'live' | 'historical'
   const [histFrom, setHistFrom] = useState(() => {
@@ -354,14 +401,22 @@ export default function WearResults() {
   const latestStop = useMemo(() => {
     const items = toArray(finishedRaw).filter(r => r.sysid && r.sysid !== 'unknown')
     if (!items.length) return null
-    return items.sort((a, b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    // Sort by datetime — handles both epoch ms (number) and string format
+    return items.sort((a, b) => {
+      const da = parseStopDt(a.datetime)
+      const db = parseStopDt(b.datetime)
+      return db - da
+    })[0]
   }, [finishedRaw])
 
   // Measurement is active if latest start is after latest stop
   const isActive = useMemo(() => {
     if (!latestStart) return false
     if (!latestStop) return true
-    return String(latestStart.datetime) > String(latestStop.datetime)
+    // Compare start (string datetime) vs stop (epoch ms or string)
+    const startMs = parseDt(latestStart.datetime)?.getTime() ?? 0
+    const stopMs  = parseStopDt(latestStop.datetime)
+    return startMs > stopMs
   }, [latestStart, latestStop])
 
   // ── Fetch wear data ───────────────────────────────────────
@@ -379,10 +434,22 @@ export default function WearResults() {
   // Never send null from date — would fetch entire table
   const liveEnabled = mode === 'live' && !!liveFromStr
 
+  // Stable 'to' date — set once when live mode activates, doesn't change each render
+  // This prevents useApi argsKey from changing every render → stops flickering
+  const liveToRef = useRef(null)
+  useEffect(() => {
+    if (liveEnabled) {
+      // Set to 24hrs from now — stable, won't change each render
+      const future = new Date()
+      future.setHours(future.getHours() + 24)
+      liveToRef.current = future.toISOString()
+    }
+  }, [liveFromStr, liveEnabled])
+
   const { data: rawData, loading, error, refresh } = useApi(
     fetchWearData,
     mode === 'live'
-      ? [sysid, rollid, liveFromStr, new Date().toISOString()]
+      ? [sysid, rollid, liveFromStr, liveToRef.current]
       : [sysid, rollid, new Date(histFrom).toISOString(), new Date(histTo).toISOString()],
     {
       pollMs: liveEnabled ? 30000 : null,
@@ -519,12 +586,12 @@ export default function WearResults() {
   return (
     <div style={{ maxWidth: '1100px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
-      {/* ── Section 1: Mode selector ── */}
+      {/* ── Section 1: Controls ── */}
       <div className="card">
         <SectionHead title="Wear Results" />
 
-        {/* Roll selector */}
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '16px' }}>
+        {/* Row 1: PLC ID | Roll | Live/Historical */}
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '14px' }}>
           <div>
             <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px' }}>PLC ID</div>
             <SysIdSelector value={sysid} onChange={setSysId} />
@@ -541,27 +608,86 @@ export default function WearResults() {
               ))}
             </div>
           </div>
+          {/* Live / Historical toggle */}
+          <div style={{ display: 'flex', gap: '0', border: '1.5px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden' }}>
+            {['live', 'historical'].map(m => (
+              <button key={m} onClick={() => setMode(m)}
+                style={{
+                  padding: '8px 20px', fontSize: '13px', fontWeight: mode === m ? '700' : '400',
+                  background: mode === m ? '#1d4ed8' : '#fff',
+                  color: mode === m ? '#fff' : '#64748b',
+                  border: 'none', cursor: 'pointer', fontFamily: 'inherit',
+                }}>
+                {m === 'live' ? '🔴 Live' : '📅 Historical'}
+              </button>
+            ))}
+          </div>
         </div>
 
-        {/* Live / Historical toggle */}
-        <div style={{ display: 'flex', gap: '0', marginBottom: '16px', border: '1.5px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', width: 'fit-content' }}>
-          {['live', 'historical'].map(m => (
-            <button key={m} onClick={() => setMode(m)}
-              style={{
-                padding: '9px 24px', fontSize: '13px', fontWeight: mode === m ? '700' : '400',
-                background: mode === m ? '#1d4ed8' : '#fff',
-                color: mode === m ? '#fff' : '#64748b',
-                border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                textTransform: 'capitalize',
-              }}>
-              {m === 'live' ? '🔴 Live' : '📅 Historical'}
-            </button>
-          ))}
+        {/* Row 2: Start/Stop + Status */}
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <button
+            onClick={handleStart}
+            disabled={actionLoading || isActive}
+            style={{
+              padding: '8px 20px', fontSize: '13px', fontWeight: '600',
+              background: isActive ? '#dcfce7' : '#22c55e',
+              color: isActive ? '#166534' : '#fff',
+              border: `1px solid ${isActive ? '#bbf7d0' : '#16a34a'}`,
+              borderRadius: '8px', cursor: isActive ? 'default' : 'pointer',
+              fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '6px',
+            }}>
+            {actionLoading ? <Spinner size="sm" /> : '▶'} Start
+          </button>
+          <button
+            onClick={handleStop}
+            disabled={actionLoading || !isActive}
+            style={{
+              padding: '8px 20px', fontSize: '13px', fontWeight: '600',
+              background: !isActive ? '#f1f5f9' : '#ef4444',
+              color: !isActive ? '#94a3b8' : '#fff',
+              border: `1px solid ${!isActive ? '#e2e8f0' : '#dc2626'}`,
+              borderRadius: '8px', cursor: !isActive ? 'default' : 'pointer',
+              fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '6px',
+            }}>
+            {actionLoading ? <Spinner size="sm" /> : '⏹'} Stop
+          </button>
+
+          {/* Status badge */}
+          {isActive ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', fontSize: '12px', color: '#166534', fontWeight: '600' }}>
+              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
+              Measurement active · Started: {fmtDt(latestStart?.datetime)}
+            </div>
+          ) : (
+            <div style={{ padding: '8px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px', color: '#64748b' }}>
+              ⚪ No active measurement
+              {lastRecordDt && <span> · Last data: {fmtDt(lastRecordDt)}</span>}
+            </div>
+          )}
+
+          {/* Refresh */}
+          <button className="btn-secondary"
+            onClick={() => { refreshStarted(); refreshFinished(); refresh() }}
+            style={{ fontSize: '12px', padding: '7px 14px', marginLeft: 'auto' }}>
+            ↻ Refresh
+          </button>
         </div>
+
+        {/* Action feedback */}
+        {actionMsg && (
+          <div style={{ padding: '8px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: '600', marginBottom: '8px',
+            background: actionMsg.type === 'success' ? '#f0fdf4' : '#fff5f5',
+            color: actionMsg.type === 'success' ? '#166534' : '#dc2626',
+            border: `1px solid ${actionMsg.type === 'success' ? '#bbf7d0' : '#fecaca'}`,
+          }}>
+            {actionMsg.type === 'success' ? '✓' : '✗'} {actionMsg.text}
+          </div>
+        )}
 
         {/* Historical date pickers */}
         {mode === 'historical' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap', marginTop: '4px' }}>
             <div>
               <div style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', marginBottom: '4px' }}>From</div>
               <input type="datetime-local" value={histFrom}
@@ -581,30 +707,9 @@ export default function WearResults() {
           </div>
         )}
 
-        {/* Live mode status */}
-        {mode === 'live' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-            {isActive ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 14px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', fontSize: '12px', color: '#166534', fontWeight: '600' }}>
-                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'pulse 1.5s infinite' }} />
-                Measurement active · Started: {fmtDt(latestStart?.datetime)}
-              </div>
-            ) : (
-              <div style={{ padding: '8px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '12px', color: '#64748b' }}>
-                ⚪ No active measurement
-                {lastRecordDt && <span> · Last data: {fmtDt(lastRecordDt)}</span>}
-              </div>
-            )}
-            <button className="btn-secondary" onClick={() => { refreshStarted(); refreshFinished(); refresh() }}
-              style={{ fontSize: '12px', padding: '7px 14px' }}>
-              {loading ? <Spinner size="sm" /> : '↻ Refresh'}
-            </button>
-          </div>
-        )}
-
         {/* MeasStop banner */}
         {mode === 'live' && !isActive && records.length > 0 && (
-          <div style={{ marginTop: '12px', padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', fontSize: '12px', color: '#92400e' }}>
+          <div style={{ marginTop: '10px', padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', fontSize: '12px', color: '#92400e' }}>
             ⏹ Measurement stopped · Showing last captured data · Last data from: <strong>{fmtDt(lastRecordDt)}</strong>
           </div>
         )}
