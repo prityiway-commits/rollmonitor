@@ -21,7 +21,7 @@ function getAuthHeaders() {
   }
 }
 
-const getClient = axios.create({ baseURL: GET_BASE,  timeout: 15000 })
+const getClient = axios.create({ baseURL: GET_BASE,  timeout: 30000 })
 const postClient = axios.create({ baseURL: POST_BASE, timeout: 15000 })
 
 // Inject token before every request
