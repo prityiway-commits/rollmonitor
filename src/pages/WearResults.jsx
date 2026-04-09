@@ -55,10 +55,18 @@ function parseDt(val) {
 // OR string format from DynamoDB
 function parseStopDt(val) {
   if (!val) return 0
-  // If it's a number or numeric string → epoch milliseconds
+  // Epoch ms (from IoT rule timestamp())
   const num = Number(val)
-  if (!isNaN(num) && num > 1000000000000) return num  // epoch ms
-  // Otherwise parse as string datetime
+  if (!isNaN(num) && num > 1000000000000) return num
+  // String datetime — stored as UTC
+  return parseMeasStartDt(String(val))
+}
+
+// Parse MeasStart datetime — stored in LOCAL time (IST = UTC+5:30)
+// Subtract 5.5 hours to convert to UTC ms for comparison
+// Parse MeasStart/MeasStop datetime — stored as UTC string
+function parseMeasStartDt(val) {
+  if (!val) return 0
   const d = parseDt(String(val))
   return d ? d.getTime() : 0
 }
@@ -163,52 +171,28 @@ function buildSpossData(records) {
 }
 
 // ── Heatmap helpers ──────────────────────────────────────────
-const ANGLE_BUCKETS = Array.from({ length: 37 }, (_, i) => i * 10) // 0,10...360
+// Y axis: top = index 1500, bottom = index 1
+// Direct mapping — no bucketing, each pixel row = proportional array index
 
-// Build heatmap grid: for each spos record, map W[i] to angle buckets
-// i = 1..array_size → angle = ((i-1)/array_size) × 360°
 function buildHeatmapData(sposData) {
   if (!sposData || !sposData.length) return []
   return sposData.map(({ spos, rec }) => {
-    const W    = parseWearArr(rec.wear_data)
-    const nPts = W.length
-    if (!nPts) return { spos, bucketW: {} }
-
-    const bucketW = {}
-    ANGLE_BUCKETS.forEach(b => { bucketW[b] = null })
-
-    for (let i = 1; i <= nPts; i++) {
-      const angle  = ((i - 1) / nPts) * 360
-      const bucket = Math.round(angle / 10) * 10
-      const snap   = bucket >= 360 ? 350 : bucket
-      bucketW[snap] = W[i - 1]
-    }
-    return { spos, bucketW }
-  })
+    const W = parseWearArr(rec.wear_data)
+    if (!W.length) return null
+    return { spos, W, nPts: W.length }
+  }).filter(Boolean)
 }
 
-// Colour scale:
-// W > 0 (wear):    orange → dark red   (light orange at small W, dark red at max)
-// W < 0 (buildup): blue   → dark blue  (light blue at small W, dark blue at max)
-// W = 0:           white
+// Orange→DarkRed for W>0, LightBlue→DarkBlue for W<0, White for W=0
 function heatColor(w, absMax) {
-  if (w === null || w === undefined) return '#ffffff'
-  if (Math.abs(w) < 0.1) return '#ffffff'
+  if (w === null || w === undefined || Math.abs(w) < 0.1) return [255, 255, 255]
   const mx = absMax || 10
   if (w > 0) {
-    // orange (255,165,0) → dark red (139,0,0)
     const t = Math.min(1, w / mx)
-    const r = Math.round(255 - t * (255 - 139))   // 255 → 139
-    const g = Math.round(165 * (1 - t))            // 165 → 0
-    const b = 0
-    return `rgb(${r},${g},${b})`
+    return [Math.round(255 - t*(255-139)), Math.round(165*(1-t)), 0]
   } else {
-    // light blue (173,216,230) → dark blue (0,0,139)
     const t = Math.min(1, -w / mx)
-    const r = Math.round(173 * (1 - t))            // 173 → 0
-    const g = Math.round(216 * (1 - t))            // 216 → 0
-    const b = Math.round(230 - t * (230 - 139))    // 230 → 139
-    return `rgb(${r},${g},${b})`
+    return [Math.round(173*(1-t)), Math.round(216*(1-t)), Math.round(230-t*(230-139))]
   }
 }
 
@@ -217,52 +201,69 @@ function WearHeatmap({ sposData }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
 
-  const grid = useMemo(() => buildHeatmapData(sposData), [sposData])
+  const grid   = useMemo(() => buildHeatmapData(sposData), [sposData])
+  const nCols  = grid.length
+  const maxPts = grid.reduce((m, r) => Math.max(m, r.nPts), 0) || 1500
 
   const absMax = useMemo(() => {
     let mx = 0
-    grid.forEach(({ bucketW }) => {
-      Object.values(bucketW).forEach(v => {
-        if (v !== null && Math.abs(v) > mx) mx = Math.abs(v)
-      })
-    })
+    grid.forEach(({ W }) => W.forEach(v => { if (Math.abs(v) > mx) mx = Math.abs(v) }))
     return mx || 10
   }, [grid])
 
-  const nCols = grid.length
-  const nRows = ANGLE_BUCKETS.length // 37
-
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !nCols || !nRows) return
+    if (!canvas || !nCols) return
     const ctx = canvas.getContext('2d')
-    const W   = canvas.width
-    const H   = canvas.height
-    const cW  = W / nCols
-    const cH  = H / nRows
-    ctx.clearRect(0, 0, W, H)
+    const CW  = canvas.width
+    const CH  = canvas.height
+    const imgData = ctx.createImageData(CW, CH)
+    const data    = imgData.data
+    const colW    = CW / nCols
 
-    grid.forEach(({ bucketW }, ci) => {
-      ANGLE_BUCKETS.forEach((bucket, ri) => {
-        ctx.fillStyle = heatColor(bucketW[bucket], absMax)
-        ctx.fillRect(
-          Math.floor(ci * cW), Math.floor(ri * cH),
-          Math.ceil(cW) + 1, Math.ceil(cH) + 1
-        )
-      })
+    grid.forEach(({ W, nPts }, ci) => {
+      const x0 = Math.floor(ci * colW)
+      const x1 = Math.floor((ci + 1) * colW)
+      for (let row = 0; row < CH; row++) {
+        // row=0 → index nPts (top=1500), row=CH-1 → index 1 (bottom)
+        const arrIdx = Math.floor(((CH - 1 - row) / CH) * nPts)
+        const w      = W[arrIdx] ?? 0
+        const [r, g, b] = heatColor(w, absMax)
+        for (let x = x0; x < x1; x++) {
+          const p = (row * CW + x) * 4
+          data[p] = r; data[p+1] = g; data[p+2] = b; data[p+3] = 255
+        }
+      }
     })
-  }, [grid, absMax, nCols, nRows])
+    ctx.putImageData(imgData, 0, 0)
+  }, [grid, absMax, nCols])
 
   function getCell(e) {
     const canvas = canvasRef.current
-    if (!canvas || !nCols) return [null, null]
-    const rect  = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-    const ci = Math.floor((e.clientX - rect.left) * scaleX / (canvas.width / nCols))
-    const ri = Math.floor((e.clientY - rect.top)  * scaleY / (canvas.height / nRows))
-    return [grid[ci] ?? null, ANGLE_BUCKETS[ri] ?? null]
+    if (!canvas || !nCols) return null
+    const rect   = canvas.getBoundingClientRect()
+    const px     = (e.clientX - rect.left) * canvas.width  / rect.width
+    const py     = (e.clientY - rect.top)  * canvas.height / rect.height
+    const ci     = Math.floor(px / (canvas.width / nCols))
+    const col    = grid[ci]
+    if (!col) return null
+    // row 0 = top = index nPts (1500), row CH = bottom = index 1
+    // arrIdx 0 = first element = index 1 (bottom)
+    // arrIdx nPts-1 = last element = index nPts (top)
+    // Canvas: row=0(top) → arrIdx=nPts-1 → element i=nPts (top=1500)
+    //         row=CH(bottom) → arrIdx=0 → element i=1 (bottom=1)
+    const fraction   = Math.max(0, Math.min(0.9999, py / canvas.height))
+    const arrIdx     = Math.floor(((canvas.height - py) / canvas.height) * col.nPts)
+    const clampedIdx = Math.max(0, Math.min(col.nPts - 1, arrIdx))
+    const idxLabel   = clampedIdx + 1   // 1-based: arrIdx=0→i=1(bottom), arrIdx=nPts-1→i=nPts(top)
+    return { spos: col.spos, idxLabel, w: col.W[clampedIdx] }
   }
+
+  // Y axis labels: show index values top→bottom (1500→1)
+  // Y axis labels every 100 indices, top=maxPts(1500) → bottom=1
+  const yLabels = []
+  for (let v = maxPts; v >= 100; v -= 100) yLabels.push(v)
+  if (yLabels[yLabels.length - 1] !== 1) yLabels.push(1)
 
   if (!nCols) return null
 
@@ -271,17 +272,17 @@ function WearHeatmap({ sposData }) {
       <div style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
         Wear Heatmap — Surface Map
       </div>
-      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px', lineHeight: '1.6' }}>
-        X = axial position (spos mm) · Y = angle 0°→360° (i=1→{grid[0] ? Object.keys(grid[0].bucketW).length * 10 : 1500} mapped linearly) ·
+      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>
+        X = axial position (spos mm) · Y = array index (top={maxPts} → bottom=1) ·
         <span style={{ color: '#b45309', fontWeight: '600' }}> Orange→DarkRed = wear (W&gt;0)</span> ·
         <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue→DarkBlue = buildup (W&lt;0)</span>
       </div>
 
       <div style={{ display: 'flex', gap: '8px', alignItems: 'stretch' }}>
         {/* Y axis labels */}
-        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', width: '36px', flexShrink: 0 }}>
-          {ANGLE_BUCKETS.filter((_, i) => i % 6 === 0).map(a => (
-            <span key={a} style={{ fontSize: '9px', color: '#94a3b8', textAlign: 'right', paddingRight: '4px' }}>{a}°</span>
+        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', width: '40px', flexShrink: 0 }}>
+          {yLabels.map(v => (
+            <span key={v} style={{ fontSize: '9px', color: '#94a3b8', textAlign: 'right', paddingRight: '4px' }}>{v}</span>
           ))}
         </div>
 
@@ -290,19 +291,18 @@ function WearHeatmap({ sposData }) {
           <canvas
             ref={canvasRef}
             width={Math.max(nCols * 10, 600)}
-            height={370}
-            style={{ width: '100%', height: '370px', borderRadius: '8px', border: '1px solid #e2e8f0', cursor: 'crosshair', display: 'block' }}
+            height={400}
+            style={{ width: '100%', height: '400px', borderRadius: '8px', border: '1px solid #e2e8f0', cursor: 'crosshair', display: 'block' }}
             onMouseMove={e => {
-              const [col, angle] = getCell(e)
-              if (!col) { setTooltip(null); return }
-              const w = col.bucketW?.[angle]
-              setTooltip({ spos: col.spos, angle, w: w !== null && w !== undefined ? w.toFixed(3) : '—', x: e.clientX, y: e.clientY })
+              const cell = getCell(e)
+              if (!cell) { setTooltip(null); return }
+              setTooltip({ ...cell, x: e.clientX, y: e.clientY })
             }}
             onMouseLeave={() => setTooltip(null)}
           />
           {tooltip && (
-            <div style={{ position: 'fixed', left: tooltip.x + 12, top: tooltip.y - 30, background: '#1e293b', color: '#f1f5f9', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', pointerEvents: 'none', zIndex: 9999, whiteSpace: 'nowrap' }}>
-              spos={tooltip.spos}mm · {tooltip.angle}° · W={tooltip.w}mm
+            <div style={{ position: 'fixed', left: tooltip.x+12, top: tooltip.y-30, background: '#1e293b', color: '#f1f5f9', padding: '5px 10px', borderRadius: '6px', fontSize: '11px', pointerEvents: 'none', zIndex: 9999, whiteSpace: 'nowrap' }}>
+              spos={tooltip.spos}mm · i={tooltip.idxLabel} · W={tooltip.w !== undefined ? Number(tooltip.w).toFixed(3) : '—'}mm
             </div>
           )}
         </div>
@@ -316,10 +316,10 @@ function WearHeatmap({ sposData }) {
         </div>
       </div>
 
-      {/* X axis labels — sync with chart above */}
-      <div style={{ paddingLeft: '44px', paddingRight: '52px', marginTop: '4px' }}>
+      {/* X axis labels */}
+      <div style={{ paddingLeft: '48px', paddingRight: '52px', marginTop: '4px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', color: '#94a3b8' }}>
-          {grid.filter((_, i) => i === 0 || i === Math.floor(grid.length / 2) || i === grid.length - 1).map(r => (
+          {grid.filter((_, i) => i === 0 || i === Math.floor(grid.length/2) || i === grid.length-1).map(r => (
             <span key={r.spos}>{r.spos}mm</span>
           ))}
         </div>
@@ -394,14 +394,20 @@ export default function WearResults() {
 
   const latestStart = useMemo(() => {
     const items = toArray(startedRaw).filter(r => r.sysid && r.sysid !== 'unknown')
+    console.log('[MeasStart] items:', items.length, items[0])
     if (!items.length) return null
-    return items.sort((a, b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    // Sort by parseMeasStartDt ms (IST→UTC corrected)
+    return items.sort((a, b) => {
+      const da = parseMeasStartDt(a.datetime)
+      const db = parseMeasStartDt(b.datetime)
+      return db - da
+    })[0]
   }, [startedRaw])
 
   const latestStop = useMemo(() => {
     const items = toArray(finishedRaw).filter(r => r.sysid && r.sysid !== 'unknown')
+    console.log('[MeasStop] items:', items.length, items[0])
     if (!items.length) return null
-    // Sort by datetime — handles both epoch ms (number) and string format
     return items.sort((a, b) => {
       const da = parseStopDt(a.datetime)
       const db = parseStopDt(b.datetime)
@@ -411,35 +417,31 @@ export default function WearResults() {
 
   // Measurement is active if latest start is after latest stop
   const isActive = useMemo(() => {
+    const startMs = latestStart ? parseMeasStartDt(latestStart.datetime) : 0
+    const stopMs  = latestStop  ? parseStopDt(latestStop.datetime) : 0
+    console.log('[isActive] startMs:', startMs, 'stopMs:', stopMs, 'active:', startMs > stopMs)
     if (!latestStart) return false
-    if (!latestStop) return true
-    // Compare start (string datetime) vs stop (epoch ms or string)
-    const startMs = parseDt(latestStart.datetime)?.getTime() ?? 0
-    const stopMs  = parseStopDt(latestStop.datetime)
+    if (!latestStop)  return true
     return startMs > stopMs
   }, [latestStart, latestStop])
 
   // ── Fetch wear data ───────────────────────────────────────
   const liveFromStr = useMemo(() => {
     if (!latestStart) return null
-    return latestStart.datetime
-      ? (() => {
-          const d = parseDt(latestStart.datetime)
-          return d ? d.toISOString() : null
-        })()
-      : null
+    // MeasStart datetime is IST — convert to UTC for API query
+    const ms = parseMeasStartDt(latestStart.datetime)
+    return ms ? new Date(ms).toISOString() : null
   }, [latestStart])
 
   // For live mode: only fetch if we have a MeasStart datetime
   // Never send null from date — would fetch entire table
   const liveEnabled = mode === 'live' && !!liveFromStr
 
-  // Stable 'to' date — set once when live mode activates, doesn't change each render
-  // This prevents useApi argsKey from changing every render → stops flickering
+  // Stable 'to' date — always now+24hrs, updated when liveFromStr changes
+  // Must always be AFTER liveFromStr to avoid inverted date range → 500 error
   const liveToRef = useRef(null)
   useEffect(() => {
-    if (liveEnabled) {
-      // Set to 24hrs from now — stable, won't change each render
+    if (liveEnabled && liveFromStr) {
       const future = new Date()
       future.setHours(future.getHours() + 24)
       liveToRef.current = future.toISOString()
