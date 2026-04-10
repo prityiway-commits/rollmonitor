@@ -78,15 +78,32 @@ function nextSlotCountdown(slots) {
 }
 
 // ── Config field ──────────────────────────────────────────────
-function Field({ label, name, value, unit, step, onChange }) {
+function Field({ label, name, value, unit, step, min, max, warn, onChange }) {
+  const numVal = parseFloat(value)
+  const showWarn = warn && !isNaN(numVal) && (
+    (warn.min !== undefined && numVal < warn.min) ||
+    (warn.max !== undefined && numVal > warn.max)
+  )
+  const warnMsg = warn && showWarn
+    ? warn.min !== undefined && numVal < warn.min
+      ? `⚠ Min ${warn.min} ${unit}`
+      : `⚠ Max ${warn.max} ${unit}`
+    : null
   return (
     <div style={{ display:'flex', alignItems:'center', gap:'12px', padding:'9px 0', borderBottom:'1px solid #f1f5f9' }}>
       <label style={{ fontSize:'12px', color:'#64748b', width:'180px', flexShrink:0 }}>{label}</label>
       <div style={{ display:'flex', alignItems:'center', gap:'8px', flex:1 }}>
-        <input type="number" name={name} value={value} step={step||'any'} onChange={onChange}
+        <input type="number" name={name} value={value} step={step||'any'}
+          min={min} max={max} onChange={onChange}
           className="input-field"
-          style={{ width:'140px', textAlign:'right', fontFamily:'"JetBrains Mono",monospace', fontSize:'13px' }} />
+          style={{ width:'140px', textAlign:'right', fontFamily:'"JetBrains Mono",monospace', fontSize:'13px',
+            borderColor: showWarn ? '#f59e0b' : undefined }} />
         {unit && <span style={{ fontSize:'12px', color:'#94a3b8', width:'36px' }}>{unit}</span>}
+        {showWarn && warnMsg && (
+          <span style={{ fontSize:'11px', color:'#f59e0b', fontWeight:'600' }}>
+            {warnMsg}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -514,6 +531,18 @@ export default function RollControl() {
   }, [handleAction])
 
   async function executeConfig() {
+    // Validate rpm minimum
+    if (parseFloat(config.r1_rpm) < 10 || parseFloat(config.r2_rpm) < 10) {
+      alert('Rotation speed must be at least 10 RPM for both rollers.')
+      setModal({ type: null, open: false })
+      return
+    }
+    // Validate step size maximum
+    if (parseFloat(config.r1_step) > 5 || parseFloat(config.r2_step) > 5) {
+      alert('Step size must not exceed 5mm for both rollers.')
+      setModal({ type: null, open: false })
+      return
+    }
     setLoading(true); setLastError(null)
     const res = await postMeasConfig({ sysid, ...config })
     if (res?.error) {
@@ -543,9 +572,9 @@ export default function RollControl() {
       <Field label="Max sensor distance"  name={`${prefix}_max_d`}   value={config[`${prefix}_max_d`]}   unit="mm"  onChange={handleChange} />
       <Field label="Start position"       name={`${prefix}_pos`}     value={config[`${prefix}_pos`]}     unit="mm"  onChange={handleChange} />
       <Field label="Number of steps"      name={`${prefix}_n_steps`} value={config[`${prefix}_n_steps`]} step={1}   onChange={handleChange} />
-      <Field label="Step size"            name={`${prefix}_step`}    value={config[`${prefix}_step`]}    unit="mm"  onChange={handleChange} />
+      <Field label="Step size"            name={`${prefix}_step`}    value={config[`${prefix}_step`]}    unit="mm"  max={5} warn={{ max: 5 }} onChange={handleChange} />
       <Field label="Roll radius"          name={`${prefix}_rad`}     value={config[`${prefix}_rad`]}     unit="mm"  onChange={handleChange} />
-      <Field label="Rotation speed"       name={`${prefix}_rpm`}     value={config[`${prefix}_rpm`]}     unit="rpm" onChange={handleChange} />
+      <Field label="Rotation speed"       name={`${prefix}_rpm`}     value={config[`${prefix}_rpm`]}     unit="rpm" min={10} warn={{ min: 10 }} onChange={handleChange} />
     </div>
   )
 
@@ -583,17 +612,51 @@ export default function RollControl() {
         </div>
       </div>
 
-      {/* Config confirm modal */}
-      <ConfirmModal
-        open={modal.open && modal.type === 'config'}
-        title="Apply System Configuration"
-        message={`Send MeasConfig to device ${sysid}. The PLC will update its measurement parameters immediately.`}
-        confirmLabel="Apply Configuration"
-        confirmClass="btn-primary"
-        loading={loading}
-        onConfirm={executeConfig}
-        onCancel={() => setModal({ type:null, open:false })}
-      />
+      {/* Config confirm modal — inline overlay */}
+      {modal.open && modal.type === 'config' && (
+        <div
+          onClick={() => setModal({ type:null, open:false })}
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            zIndex: 99999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(15,23,42,0.5)',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#fff', borderRadius: '18px', padding: '1.75rem',
+              width: '100%', maxWidth: '420px', margin: '1rem',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+              border: '1px solid #e2e8f0',
+            }}
+          >
+            <div style={{ fontSize:'18px', fontWeight:'700', color:'#1e293b', marginBottom:'10px' }}>
+              Apply System Configuration
+            </div>
+            <div style={{ fontSize:'14px', color:'#64748b', lineHeight:'1.6', marginBottom:'24px' }}>
+              Send MeasConfig to device {sysid}. The PLC will update its measurement parameters immediately.
+            </div>
+            <div style={{ display:'flex', justifyContent:'flex-end', gap:'10px' }}>
+              <button
+                onClick={() => setModal({ type:null, open:false })}
+                disabled={loading}
+                className="btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={executeConfig}
+                disabled={loading}
+                className="btn-primary"
+              >
+                {loading ? '...' : 'Apply Configuration'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,5 +1,4 @@
 import React from 'react'
-import { createPortal } from 'react-dom'
 import DatePicker from 'react-datepicker'
 
 // ── Spinner ──────────────────────────────────────────────────
@@ -56,24 +55,9 @@ export function ErrorBanner({ message, onRetry }) {
 // ── Confirm modal ────────────────────────────────────────────
 export function ConfirmModal({ open, title, message, confirmLabel='Confirm', confirmClass='btn-primary', onConfirm, onCancel, loading }) {
   if (!open) return null
-  return createPortal(
-    <div onClick={onCancel} style={{
-      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-      zIndex: 99999,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      padding: '1rem',
-      background: 'rgba(15,23,42,0.5)',
-      backdropFilter: 'blur(4px)',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        background: '#fff',
-        border: '1px solid #e2e8f0',
-        borderRadius: '18px',
-        padding: '1.75rem',
-        width: '100%',
-        maxWidth: '420px',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.15)',
-      }}>
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}>
         <div style={{ fontSize:'18px', fontWeight:'700', color:'#1e293b', marginBottom:'10px' }}>{title}</div>
         <div style={{ fontSize:'14px', color:'#64748b', lineHeight:'1.6', marginBottom:'24px' }}>{message}</div>
         <div style={{ display:'flex', justifyContent:'flex-end', gap:'10px' }}>
@@ -83,8 +67,7 @@ export function ConfirmModal({ open, title, message, confirmLabel='Confirm', con
           </button>
         </div>
       </div>
-    </div>,
-    document.body
+    </div>
   )
 }
 
