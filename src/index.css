@@ -102,7 +102,16 @@
 
   /* ── Modal ── */
   .modal-backdrop {
-    @apply fixed inset-0 z-50 flex items-center justify-center p-4;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    z-index: 9999 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 1rem;
     background: rgba(15, 23, 42, 0.5);
     backdrop-filter: blur(4px);
   }
@@ -114,6 +123,8 @@
     width: 100%;
     max-width: 420px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+    position: relative;
+    z-index: 10000;
   }
 
   /* ── Table ── */

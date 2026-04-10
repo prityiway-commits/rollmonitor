@@ -142,7 +142,7 @@ export function postMeasConfig(config) {
   // REAL fields must always have decimal (e.g. 250.0 not 250)
   // INT fields must be integers (e.g. 140 not 140.0)
   // JS JSON.stringify drops .0 for whole numbers — fix by using toFixed then parseFloat
-  const real = v => parseFloat(parseFloat(v).toFixed(4))  // ensures REAL type
+  const real = v => parseFloat(parseFloat(v).toFixed(1))  // ensures REAL type — e.g. 250.0 not 250.0000
   const int  = v => parseInt(v, 10)                        // ensures INT type
 
   const payload = {

@@ -23,6 +23,7 @@ import {
   PointElement, LineElement, Title, Tooltip, Legend, Filler
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
+import zoomPlugin from 'chartjs-plugin-zoom'
 import axios from 'axios'
 import { fetchWearData, fetchMeasStarted, fetchMeasFinished, fetchStatusHistory, postMeasStart, postMeasStop, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
@@ -32,7 +33,7 @@ import { useRollNames } from '../components/RollNameContext'
 import { loadSettings } from '../services/analytics'
 import Plot from 'react-plotly.js'
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, zoomPlugin)
 
 const GET_BASE = 'https://yf8rql6c0c.execute-api.ap-south-1.amazonaws.com/dashboard'
 
@@ -808,6 +809,20 @@ export default function WearResults() {
   const settings     = loadSettings()
   const rollerLength = rollid === 1 ? (settings.rollerLengthR1 || 1000) : (settings.rollerLengthR2 || 1000)
 
+  // Load sensor range from saved MeasConfig for Y axis scaling
+  const sensorRange = useMemo(() => {
+    try {
+      const saved = localStorage.getItem(`rollmonitor_measconfig_${sysid}`)
+      if (saved) {
+        const cfg = JSON.parse(saved)
+        const minD = rollid === 1 ? parseFloat(cfg.r1_min_d) : parseFloat(cfg.r2_min_d)
+        const maxD = rollid === 1 ? parseFloat(cfg.r1_max_d) : parseFloat(cfg.r2_max_d)
+        if (!isNaN(minD) && !isNaN(maxD)) return { min: minD, max: maxD }
+      }
+    } catch {}
+    return { min: 250, max: 350 }  // sensible default
+  }, [sysid, rollid])
+
   // Start / Stop measurement
   const [actionLoading, setActionLoading] = useState(false)
   const [actionMsg,     setActionMsg]     = useState(null)
@@ -1028,6 +1043,20 @@ export default function WearResults() {
           label: item  => ` ${item.dataset.label}: ${Number(item.raw).toFixed(3)}mm`,
         },
       },
+      zoom: {
+        pan: {
+          enabled: true,
+          mode: 'xy',
+        },
+        zoom: {
+          wheel:  { enabled: true, modifierKey: 'ctrl' },  // Ctrl+scroll to zoom
+          pinch:  { enabled: true },
+          mode:   'xy',
+        },
+        limits: {
+          y: { min: 'original', max: 'original' },
+        },
+      },
     },
     scales: {
       x: {
@@ -1234,7 +1263,15 @@ export default function WearResults() {
 
           {/* Chart 1: S[i] and C[i] */}
           <div style={{ height: '280px', marginBottom: '8px' }}>
-            <Line data={scData} options={commonOpts('Distance (mm)')} />
+            <Line id="scChart" data={scData} options={commonOpts('Distance (mm)', sensorRange.min, sensorRange.max)} />
+          </div>
+          <div style={{ display:'flex', justifyContent:'flex-end', marginTop:'4px' }}>
+            <button onClick={() => {
+              const chart = ChartJS.getChart('scChart')
+              if (chart) chart.resetZoom()
+            }} style={{ fontSize:'11px', padding:'4px 10px', border:'1px solid #e2e8f0', borderRadius:'6px', background:'#fff', cursor:'pointer', color:'#64748b', fontFamily:'inherit' }}>
+              ↺ Reset zoom
+            </button>
           </div>
 
           <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '20px', marginBottom: '8px', lineHeight: '1.6' }}>
