@@ -6,12 +6,13 @@
  * Section 3: Measurement Control (per roll, with rename + status display)
  * Section 4: Schedule Measurement
  */
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import toast from 'react-hot-toast'
 import {
   postMeasConfig, postMeasStart, postMeasStop,
-  fetchMeasStarted, fetchMeasFinished, toArray,
+  fetchMeasStarted, fetchMeasFinished, fetchStatusHistory, toArray,
 } from '../services/api'
+import { useApi } from '../hooks/useApi'
 import { Spinner, ConfirmModal, SectionHead, ErrorBanner } from '../components'
 import SysIdSelector, { useSysId } from '../components/SysIdSelector'
 import { useRollNames } from '../components/RollNameContext'
@@ -496,6 +497,8 @@ function ScheduleSection({ sysid, onScheduledAction }) {
 }
 
 // ── Main page ─────────────────────────────────────────────────
+const safeFloat = v => { const n = parseFloat(v); return isNaN(n) ? null : n }
+
 export default function RollControl() {
   const [sysid, setSysId]           = useSysId()
   const { names, updateName }       = useRollNames()
@@ -503,6 +506,18 @@ export default function RollControl() {
   const [modal,     setModal]       = useState({ type: null, open: false })
   const [loading,   setLoading]     = useState(false)
   const [lastError, setLastError]   = useState(null)
+
+  // Fetch latest status for showing current PLC values
+  const statusFrom = useMemo(() => {
+    const d = new Date(); d.setHours(d.getHours() - 24); return d.toISOString()
+  }, [])
+  const statusTo = useMemo(() => new Date().toISOString(), [])
+  const { data: statusRaw } = useApi(fetchStatusHistory, [sysid, statusFrom, statusTo], { pollMs: 30000 })
+  const latestStatus = useMemo(() => {
+    const items = toArray(statusRaw).filter(r => r.sysid && r.sysid !== 'unknown')
+    if (!items.length) return null
+    return items.sort((a,b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+  }, [statusRaw])
 
   // Save config to localStorage when sysid changes — load saved config
   useEffect(() => {
@@ -543,6 +558,12 @@ export default function RollControl() {
       setModal({ type: null, open: false })
       return
     }
+    // Validate start position maximum
+    if (parseFloat(config.r1_pos) > 500 || parseFloat(config.r2_pos) > 500) {
+      alert('Start position must not exceed 500mm for both rollers.')
+      setModal({ type: null, open: false })
+      return
+    }
     setLoading(true); setLastError(null)
     const res = await postMeasConfig({ sysid, ...config })
     if (res?.error) {
@@ -562,46 +583,141 @@ export default function RollControl() {
     setModal({ type: null, open: false })
   }
 
-  const rollSection = (prefix, rollKey) => (
-    <div>
-      <div style={{ fontSize:'12px', fontWeight:'700', color:'#1d6fbd', textTransform:'uppercase',
-        letterSpacing:'0.07em', padding:'10px 0 8px', borderBottom:'2px solid #eff6ff', marginBottom:'4px' }}>
-        {names[rollKey]}
+  const rollSection = (prefix, rollKey) => {
+    const s = latestStatus
+    const pf = v => s?.[`${prefix}_${v}`] != null ? parseFloat(s[`${prefix}_${v}`]).toFixed(1) : '—'
+    const pi = v => s?.[`${prefix}_${v}`] != null ? parseInt(s[`${prefix}_${v}`]) : '—'
+    const statusStyle = { fontSize:'12px', color:'#22c55e', fontFamily:'"JetBrains Mono",monospace', textAlign:'right', minWidth:'60px' }
+    return (
+      <div>
+        <div style={{ fontSize:'12px', fontWeight:'700', color:'#1d6fbd', textTransform:'uppercase',
+          letterSpacing:'0.07em', padding:'10px 0 8px', borderBottom:'2px solid #eff6ff', marginBottom:'4px' }}>
+          {names[rollKey]}
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:'0' }}>
+          {/* Column headers */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 110px 30px 110px', gap:'8px', padding:'4px 0 8px', borderBottom:'1px solid #e2e8f0' }}>
+            <span style={{ fontSize:'11px', fontWeight:'600', color:'#475569' }}>Parameter</span>
+            <span style={{ fontSize:'11px', fontWeight:'600', color:'#475569', textAlign:'center' }}>Set value</span>
+            <span/>
+            <span style={{ fontSize:'11px', fontWeight:'600', color:'#475569', textAlign:'center' }}>PLC Status</span>
+          </div>
+          {/* Rows */}
+          {[
+            { label:'Min sensor distance',      field:'min_d',   unit:'mm',  type:'real' },
+            { label:'Max sensor distance',       field:'max_d',   unit:'mm',  type:'real' },
+            { label:'Start position',            field:'pos',     unit:'mm',  type:'real', max:500, hint:'max 500mm' },
+            { label:'Number of steps',           field:'n_steps', unit:'',    type:'int'  },
+            { label:'Step size',                 field:'step',    unit:'mm',  type:'real', max:5,   hint:'max 5mm'   },
+            { label:'Roll radius',               field:'rad',     unit:'mm',  type:'real' },
+            { label:'Rotation speed',            field:'rpm',     unit:'rpm', type:'real', min:10,  hint:'min 10rpm' },
+          ].map(({ label, field, unit, type, min, max, hint }) => {
+            const name   = `${prefix}_${field}`
+            const val    = config[name]
+            const numVal = parseFloat(val)
+            const overMax  = max  && !isNaN(numVal) && numVal > max
+            const underMin = min  && !isNaN(numVal) && numVal < min
+            const hasWarn  = overMax || underMin
+            const plcVal   = type === 'int' ? pi(field) : pf(field)
+            return (
+              <div key={name} style={{ display:'grid', gridTemplateColumns:'1fr 110px 30px 110px', gap:'8px', alignItems:'center', padding:'8px 0', borderBottom:'1px solid #f1f5f9' }}>
+                <div>
+                  <span style={{ fontSize:'13px', color:'#334155' }}>{label}</span>
+                  {hint && <span style={{ fontSize:'11px', color:'#94a3b8', marginLeft:'6px' }}>({hint})</span>}
+                </div>
+                {/* Input box — white bg, grey border, clearly editable */}
+                <input
+                  type="number" name={name} value={val}
+                  min={min} max={max} step={type==='int'?1:'any'}
+                  onChange={handleChange}
+                  style={{
+                    width:'100%', textAlign:'right',
+                    fontFamily:'"JetBrains Mono",monospace', fontSize:'13px',
+                    background:'#ffffff',
+                    border: hasWarn ? '1.5px solid #f59e0b' : '1.5px solid #cbd5e1',
+                    borderRadius:'6px', padding:'5px 8px',
+                    outline:'none', color:'#1e293b',
+                    boxShadow:'0 1px 2px rgba(0,0,0,0.04)',
+                  }}
+                />
+                <span style={{ fontSize:'12px', color:'#94a3b8', textAlign:'center' }}>{unit}</span>
+                {/* PLC Status box — grey bg, dark border, read-only feel */}
+                <div style={{
+                  background:'#f1f5f9',
+                  border:'1px solid #cbd5e1',
+                  borderRadius:'6px', padding:'5px 8px',
+                  textAlign:'right',
+                  fontFamily:'"JetBrains Mono",monospace', fontSize:'13px',
+                  color: plcVal === '—' ? '#94a3b8' : '#15803d',
+                  fontWeight: plcVal === '—' ? '400' : '500',
+                }}>
+                  {plcVal}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        {/* Warnings */}
+        {config[`${prefix}_pos`] > 500 && <div style={{ fontSize:'11px', color:'#f59e0b', marginTop:'4px' }}>⚠ Start position max 500mm</div>}
+        {config[`${prefix}_step`] > 5   && <div style={{ fontSize:'11px', color:'#f59e0b', marginTop:'4px' }}>⚠ Step size max 5mm</div>}
+        {config[`${prefix}_rpm`] < 10   && <div style={{ fontSize:'11px', color:'#f59e0b', marginTop:'4px' }}>⚠ Rotation speed min 10rpm</div>}
       </div>
-      <Field label="Min sensor distance"  name={`${prefix}_min_d`}   value={config[`${prefix}_min_d`]}   unit="mm"  onChange={handleChange} />
-      <Field label="Max sensor distance"  name={`${prefix}_max_d`}   value={config[`${prefix}_max_d`]}   unit="mm"  onChange={handleChange} />
-      <Field label="Start position"       name={`${prefix}_pos`}     value={config[`${prefix}_pos`]}     unit="mm"  onChange={handleChange} />
-      <Field label="Number of steps"      name={`${prefix}_n_steps`} value={config[`${prefix}_n_steps`]} step={1}   onChange={handleChange} />
-      <Field label="Step size"            name={`${prefix}_step`}    value={config[`${prefix}_step`]}    unit="mm"  max={5} warn={{ max: 5 }} onChange={handleChange} />
-      <Field label="Roll radius"          name={`${prefix}_rad`}     value={config[`${prefix}_rad`]}     unit="mm"  onChange={handleChange} />
-      <Field label="Rotation speed"       name={`${prefix}_rpm`}     value={config[`${prefix}_rpm`]}     unit="rpm" min={10} warn={{ min: 10 }} onChange={handleChange} />
-    </div>
-  )
+    )
+  }
+
+  // MQTT status — green if last status < 2 min ago
+  const mqttConnected = useMemo(() => {
+    if (!latestStatus?.datetime) return false
+    try {
+      const dt = new Date(latestStatus.datetime.replace(
+        /^(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2}:\d{2})/, '$1T$2'
+      ) + 'Z')
+      return (Date.now() - dt.getTime()) < 2 * 60 * 1000
+    } catch { return false }
+  }, [latestStatus])
 
   return (
-    <div style={{ maxWidth:'900px', display:'flex', flexDirection:'column', gap:'20px' }}>
+    <div style={{ maxWidth:'1100px', display:'flex', flexDirection:'column', gap:'16px' }}>
 
-      {/* ── Section 1: PLC ID ── */}
-      <div className="card" style={{ padding:'14px 20px' }}>
-        <div style={{ fontSize:'11px', fontWeight:'700', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'10px' }}>
-          PLC ID
+      {/* ── Row 1: PLC ID + MQTT Status ── */}
+      <div className="card" style={{ padding:'12px 20px', display:'flex', alignItems:'center', gap:'24px', flexWrap:'wrap' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+          <span style={{ fontSize:'12px', fontWeight:'600', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.06em' }}>PLC ID</span>
+          <SysIdSelector value={sysid} onChange={setSysId} />
         </div>
-        <SysIdSelector value={sysid} onChange={setSysId} />
+        <div style={{ display:'flex', alignItems:'center', gap:'8px', marginLeft:'auto' }}>
+          <span style={{ fontSize:'12px', fontWeight:'600', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.06em' }}>MQTT Status</span>
+          <div style={{ display:'flex', alignItems:'center', gap:'6px', padding:'4px 12px',
+            background: mqttConnected ? '#f0fdf4' : '#fef2f2',
+            border: `1px solid ${mqttConnected ? '#bbf7d0' : '#fecaca'}`,
+            borderRadius:'20px' }}>
+            <div style={{ width:'7px', height:'7px', borderRadius:'50%',
+              background: mqttConnected ? '#22c55e' : '#ef4444' }} />
+            <span style={{ fontSize:'12px', fontWeight:'600',
+              color: mqttConnected ? '#15803d' : '#dc2626' }}>
+              {mqttConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+          {latestStatus?.datetime && (
+            <span style={{ fontSize:'11px', color:'#94a3b8' }}>
+              Last seen: {latestStatus.datetime.replace('T',' ').slice(0,19)}
+            </span>
+          )}
+        </div>
       </div>
 
       <ErrorBanner message={lastError} />
 
       {/* ── System Configuration ── */}
       <div className="card">
-        <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b', marginBottom:'4px' }}>
+        <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b', marginBottom:'2px' }}>
           System Configuration
         </div>
-        <p style={{ fontSize:'13px', color:'#94a3b8', marginBottom:'16px', lineHeight:'1.6' }}>
+        <p style={{ fontSize:'12px', color:'#94a3b8', marginBottom:'16px', lineHeight:'1.6' }}>
           Edit parameters and click <strong style={{ color:'#1d4ed8' }}>Apply Configuration</strong> to send MeasConfig to the PLC.
-          When accepted, <code style={{ background:'#f1f5f9', padding:'1px 6px', borderRadius:'4px', fontSize:'12px' }}>conf</code> changes to <strong>1</strong> on the Dashboard.
-          This section is needed only during initial setup or when configuration changes.
+          PLC column shows current values from latest Status message.
         </p>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'24px' }}>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'32px' }}>
           {rollSection('r1', 'r1')}
           {rollSection('r2', 'r2')}
         </div>
