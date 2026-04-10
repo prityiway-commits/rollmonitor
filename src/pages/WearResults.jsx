@@ -24,12 +24,13 @@ import {
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 import axios from 'axios'
-import { fetchWearData, fetchMeasStarted, fetchMeasFinished, postMeasStart, postMeasStop, toArray } from '../services/api'
+import { fetchWearData, fetchMeasStarted, fetchMeasFinished, fetchStatusHistory, postMeasStart, postMeasStop, toArray } from '../services/api'
 import { useApi } from '../hooks/useApi'
 import { Spinner, ErrorBanner, SectionHead } from '../components'
 import SysIdSelector, { useSysId } from '../components/SysIdSelector'
 import { useRollNames } from '../components/RollNameContext'
 import { loadSettings } from '../services/analytics'
+import Plot from 'react-plotly.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
 
@@ -188,11 +189,16 @@ function heatColor(w, absMax) {
   if (w === null || w === undefined || Math.abs(w) < 0.1) return [255, 255, 255]
   const mx = absMax || 10
   if (w > 0) {
+    // Buildup → blue (light blue to dark blue)
     const t = Math.min(1, w / mx)
-    return [Math.round(255 - t*(255-139)), Math.round(165*(1-t)), 0]
+    const r = Math.round(173 * (1 - t))
+    const g = Math.round(216 * (1 - t))
+    const b = Math.round(230 - t * (230 - 139))
+    return [r, g, b]
   } else {
+    // Wear → red/orange (light orange to dark red)
     const t = Math.min(1, -w / mx)
-    return [Math.round(173*(1-t)), Math.round(216*(1-t)), Math.round(230-t*(230-139))]
+    return [Math.round(255 - t * (255 - 139)), Math.round(165 * (1 - t)), 0]
   }
 }
 
@@ -214,24 +220,28 @@ function WearHeatmap({ sposData }) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !nCols) return
+    const CW = canvas.width
+    const CH = canvas.height
+    if (!CW || !CH) return
     const ctx = canvas.getContext('2d')
-    const CW  = canvas.width
-    const CH  = canvas.height
     const imgData = ctx.createImageData(CW, CH)
     const data    = imgData.data
-    const colW    = CW / nCols
+    if (!data || !data.length) return
+    const colW = CW / nCols
 
     grid.forEach(({ W, nPts }, ci) => {
+      if (!W || !nPts) return
       const x0 = Math.floor(ci * colW)
       const x1 = Math.floor((ci + 1) * colW)
       for (let row = 0; row < CH; row++) {
-        // row=0 → index nPts (top=1500), row=CH-1 → index 1 (bottom)
-        const arrIdx = Math.floor(((CH - 1 - row) / CH) * nPts)
-        const w      = W[arrIdx] ?? 0
+        const arrIdx = Math.max(0, Math.min(nPts-1, Math.floor(((CH - 1 - row) / CH) * nPts)))
+        const w = W[arrIdx] ?? 0
         const [r, g, b] = heatColor(w, absMax)
         for (let x = x0; x < x1; x++) {
           const p = (row * CW + x) * 4
-          data[p] = r; data[p+1] = g; data[p+2] = b; data[p+3] = 255
+          if (p >= 0 && p + 3 < data.length) {
+            data[p] = r; data[p+1] = g; data[p+2] = b; data[p+3] = 255
+          }
         }
       }
     })
@@ -274,8 +284,8 @@ function WearHeatmap({ sposData }) {
       </div>
       <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>
         X = axial position (spos mm) · Y = array index (top={maxPts} → bottom=1) ·
-        <span style={{ color: '#b45309', fontWeight: '600' }}> Orange→DarkRed = wear (W&gt;0)</span> ·
-        <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue→DarkBlue = buildup (W&lt;0)</span>
+        <span style={{ color: '#dc2626', fontWeight: '600' }}> Red = wear (W&lt;0)</span> ·
+        <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue = buildup (W&gt;0)</span>
       </div>
 
       <div style={{ display: 'flex', gap: '8px', alignItems: 'stretch' }}>
@@ -331,7 +341,446 @@ function WearHeatmap({ sposData }) {
   )
 }
 
-// ── Stat Card ─────────────────────────────────────────────────
+// ── Plotly Heatmap ───────────────────────────────────────────
+function PlotlyHeatmap({ sposData }) {
+  const plotData = useMemo(() => {
+    if (!sposData || !sposData.length) return null
+    const xLabels = sposData.map(r => r.spos)
+    const nPts    = sposData[0]?.rec ? parseWearArr(sposData[0].rec.wear_data).length : 100
+    const yLabels = Array.from({ length: nPts }, (_, i) => i + 1) // 1..nPts
+
+    // Build Z matrix: rows=index(1..nPts), cols=spos
+    // Z[row][col] = W[row] at spos[col]
+    // Use max nPts across all records to avoid out-of-bounds
+    const allNpts = sposData.map(r => parseWearArr(r.rec.wear_data).length)
+    const maxNpts = Math.max(...allNpts)
+    const Z = Array.from({ length: maxNpts }, () => new Array(sposData.length).fill(null))
+    sposData.forEach((r, ci) => {
+      const W = parseWearArr(r.rec.wear_data)
+      W.forEach((w, i) => {
+        if (i < maxNpts && Z[i]) Z[i][ci] = w
+      })
+    })
+
+    return { xLabels, yLabels, Z }
+  }, [sposData])
+
+  if (!plotData) return null
+
+  // Colorscale mapped to W range [-20, 20]:
+  // W=-20 → darkest red, W=-1 → light orange, W=0 → white
+  // W=1 → light blue, W=4+ → dark blue
+  // Normalized: 0=W=-20, 0.475=W=-1, 0.5=W=0, 0.525=W=+1, 0.6=W=+4, 1=W=+20
+  const colorscale = [
+    [0,     'rgb(139,0,0)'],      // darkest red — max wear (-20mm)
+    [0.3,   'rgb(255,100,0)'],    // orange
+    [0.45,  'rgb(255,200,150)'],  // light orange (-1mm)
+    [0.5,   'rgb(255,255,255)'],  // white (0mm)
+    [0.55,  'rgb(173,216,230)'],  // light blue (+1mm)
+    [0.7,   'rgb(100,149,237)'],  // medium blue (+4mm)
+    [1,     'rgb(0,0,139)'],      // darkest blue — max buildup (+20mm)
+  ]
+
+  return (
+    <div style={{ marginTop: '24px' }}>
+      <div style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
+        Wear Heatmap — Plotly (Interactive)
+      </div>
+      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '8px' }}>
+        X = spos (mm) · Y = array index (1→{plotData.yLabels.length}) · Colour = W[i] (mm) · Scroll to zoom · Drag to pan
+      </div>
+      <Plot
+        data={[{
+          type:        'heatmap',
+          x:           plotData.xLabels,
+          y:           plotData.yLabels,
+          z:           plotData.Z,
+          colorscale,
+          zmin:        -20,
+          zmax:        20,
+          zmid:        0,
+          colorbar: {
+            title: { text: 'W (mm)', side: 'right' },
+            thickness: 15, len: 0.9,
+            tickvals: [-20, -10, -1, 0, 1, 4, 10, 20],
+            ticktext: ['-20 (wear)', '-10', '-1', '0', '+1', '+4', '+10', '+20 (buildup)'],
+          },
+          hoverongaps: false,
+          hovertemplate: 'spos=%{x}mm<br>i=%{y}<br>W=%{z:.3f}mm<extra></extra>',
+        }]}
+        layout={{
+          margin:      { l: 60, r: 80, t: 20, b: 60 },
+          xaxis:       { title: { text: 'Axial position (spos mm)' }, color: '#64748b' },
+          yaxis:       { title: { text: 'Array index i' }, color: '#64748b' },
+          paper_bgcolor: 'transparent',
+          plot_bgcolor:  '#fafafa',
+          height:        450,
+          xaxis: {
+            title: { text: 'Axial position (spos mm)' },
+            color: '#64748b',
+            rangeslider: { visible: true, thickness: 0.05 },
+          },
+        }}
+        config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+        style={{ width: '100%' }}
+      />
+    </div>
+  )
+}
+
+// ── Plotly Polar Plot ─────────────────────────────────────────
+function PlotlyPolarPlot({ sposData, rollid, sysid, liveMode }) {
+  const [selectedSpos, setSelectedSpos] = useState(null)
+  const [radius,       setRadius]       = useState(null)
+
+  // Fetch radius from latest status record (last 24hrs)
+  const statusFrom = useMemo(() => {
+    const d = new Date(); d.setHours(d.getHours() - 24); return d.toISOString()
+  }, [])
+  const statusTo = useMemo(() => new Date().toISOString(), [])
+  const { data: statusRaw } = useApi(fetchStatusHistory, [sysid, statusFrom, statusTo], { pollMs: 60000 })
+  useEffect(() => {
+    const items = toArray(statusRaw).filter(r => r.sysid && r.sysid !== 'unknown')
+    if (!items.length) return
+    const latest = items.sort((a, b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    const r = rollid === 1 ? safeFloat(latest?.r1_rad) : safeFloat(latest?.r2_rad)
+    console.log('[PolarPlot] radius from status:', r, 'rollid:', rollid, 'latest:', latest)
+    if (r && r > 0) setRadius(r)
+  }, [statusRaw, rollid])
+
+  // Auto-select latest spos in live mode, first spos in historical
+  const sposList = useMemo(() => sposData.map(r => r.spos), [sposData])
+
+  useEffect(() => {
+    if (!sposList.length) return
+    if (liveMode) {
+      setSelectedSpos(sposList[sposList.length - 1]) // latest = highest spos
+    } else {
+      setSelectedSpos(prev => prev && sposList.includes(prev) ? prev : sposList[0])
+    }
+  }, [sposList, liveMode])
+
+  const currentIdx = sposList.indexOf(selectedSpos)
+
+  function goPrev() {
+    if (currentIdx > 0) setSelectedSpos(sposList[currentIdx - 1])
+  }
+  function goNext() {
+    if (currentIdx < sposList.length - 1) setSelectedSpos(sposList[currentIdx + 1])
+  }
+
+  // Build polar trace for selected spos
+  const plotData = useMemo(() => {
+    if (!selectedSpos || !radius) return null
+    const row = sposData.find(r => r.spos === selectedSpos)
+    if (!row) return null
+
+    const W    = parseWearArr(row.rec.wear_data)
+    const C    = computeC(row.rec)
+    const nPts = W.length
+    if (!nPts || !C.length) return null
+
+    // S[i] = C[i] + W[i], r[i] = radius - S[i]
+    const rVals     = []
+    const thetaVals = []
+    for (let i = 0; i < nPts; i++) {
+      const S = (C[i] || 0) + W[i]
+      rVals.push(Math.max(0, radius - S))
+      thetaVals.push((i / nPts) * 360)
+    }
+    // Close the loop
+    rVals.push(rVals[0])
+    thetaVals.push(360)
+
+    // Baseline: r = radius - avg(S)
+    const avgS      = rVals.reduce((s, v) => s + v, 0) / rVals.length
+    const baseR     = Array(37).fill(avgS)
+    const baseTheta = Array.from({ length: 37 }, (_, i) => i * 10)
+
+    return { rVals, thetaVals, baseR, baseTheta, avgS: avgS.toFixed(1) }
+  }, [selectedSpos, radius, sposData])
+
+  if (!sposData.length) return null
+
+  return (
+    <div style={{ marginTop: '24px' }}>
+      <div style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', marginBottom: '8px' }}>
+        Polar Cross-Section — r = r1_rad − S[i]
+      </div>
+      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '12px' }}>
+        Radius from Status message: <strong>{radius ? `${radius}mm` : 'loading...'}</strong> ·
+        r[i] = {radius}mm − S[i] · Worn area → r smaller (inside) · Buildup → r larger (outside)
+      </div>
+
+      {/* Spos selector */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+        <button onClick={goPrev} disabled={currentIdx <= 0}
+          style={{ padding: '6px 12px', fontSize: '13px', border: '1px solid #e2e8f0', borderRadius: '6px', background: currentIdx <= 0 ? '#f1f5f9' : '#fff', cursor: currentIdx <= 0 ? 'default' : 'pointer', fontFamily: 'inherit' }}>
+          ◀
+        </button>
+        <select value={selectedSpos ?? ''} onChange={e => setSelectedSpos(parseFloat(e.target.value))}
+          style={{ padding: '6px 12px', fontSize: '13px', border: '1px solid #e2e8f0', borderRadius: '6px', background: '#fff', fontFamily: 'inherit' }}>
+          {sposList.map(s => (
+            <option key={s} value={s}>spos = {s}mm</option>
+          ))}
+        </select>
+        <button onClick={goNext} disabled={currentIdx >= sposList.length - 1}
+          style={{ padding: '6px 12px', fontSize: '13px', border: '1px solid #e2e8f0', borderRadius: '6px', background: currentIdx >= sposList.length - 1 ? '#f1f5f9' : '#fff', cursor: currentIdx >= sposList.length - 1 ? 'default' : 'pointer', fontFamily: 'inherit' }}>
+          ▶
+        </button>
+        <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+          {currentIdx + 1} of {sposList.length} positions
+        </span>
+        {liveMode && (
+          <span style={{ fontSize: '11px', color: '#22c55e', fontWeight: '600' }}>● Auto-tracking latest spos</span>
+        )}
+      </div>
+
+      {plotData && radius ? (
+        <Plot
+          data={[
+            {
+              type: 'scatterpolar',
+              r:     plotData.baseR,
+              theta: plotData.baseTheta,
+              mode:  'lines',
+              name:  `Baseline (avg r=${plotData.avgS}mm)`,
+              line:  { color: '#94a3b8', width: 1.5, dash: 'dash' },
+              hovertemplate: 'Baseline<br>r=%{r:.2f}mm<extra></extra>',
+            },
+            {
+              type: 'scatterpolar',
+              r:     plotData.rVals,
+              theta: plotData.thetaVals,
+              mode:  'lines',
+              name:  `spos=${selectedSpos}mm`,
+              line:  { color: '#1d4ed8', width: 2 },
+              fill:  'toself',
+              fillcolor: 'rgba(29,78,216,0.08)',
+              hovertemplate: 'θ=%{theta:.1f}°<br>r=%{r:.3f}mm<br>W=%{customdata:.3f}mm<extra></extra>',
+            customdata: plotData.wVals,
+            },
+          ]}
+          layout={{
+            polar: {
+              radialaxis: {
+                visible: true,
+                range:   [plotData.rMin, plotData.rMax],
+                title:   { text: 'r (mm)' },
+                color:   '#64748b',
+                tickfont: { size: 10 },
+                tickvals: plotData ? [plotData.rMin, radius] : [],
+                ticktext: plotData ? [Math.round(plotData.rMin) + 'mm', (radius || '') + 'mm (baseline)'] : [],
+                gridcount: 2,
+              },
+              angularaxis: {
+                direction: 'clockwise',
+                rotation:  90,
+                color:     '#64748b',
+                tickfont:  { size: 10 },
+                dtick:     45,
+              },
+            },
+            showlegend:    true,
+            legend:        { x: 1.05, y: 1 },
+            margin:        { l: 40, r: 120, t: 20, b: 40 },
+            paper_bgcolor: 'transparent',
+            height:        500,
+          }}
+          config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+          style={{ width: '100%' }}
+        />
+      ) : (
+        <div style={{ padding: '2rem', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>
+          {!radius ? 'Fetching radius from Status table...' : 'Select a spos position to view polar plot'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Wear Polar Plot — r = r1_rad + W[i] ─────────────────────
+// Grey circle = r1_rad (baseline, fixed)
+// Blue circle = r1_rad + W[i] for i=1..nPts across 0°→360°
+// W>0 (buildup) → outside grey circle
+// W<0 (wear)    → inside grey circle
+
+function smoothArr(arr, half=2) {
+  return arr.map((_, i) => {
+    const s = arr.slice(Math.max(0,i-half), Math.min(arr.length,i+half+1))
+    return s.reduce((a,v)=>a+v,0)/s.length
+  })
+}
+
+function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
+  const [selectedSpos, setSelectedSpos] = useState(null)
+  const [radius,       setRadius]       = useState(null)
+
+  const statusFrom = useMemo(() => {
+    const d = new Date(); d.setHours(d.getHours() - 24); return d.toISOString()
+  }, [])
+  const statusTo = useMemo(() => new Date().toISOString(), [])
+  const { data: statusRaw } = useApi(fetchStatusHistory, [sysid, statusFrom, statusTo], { pollMs: 60000 })
+
+  useEffect(() => {
+    const items = toArray(statusRaw).filter(r => r.sysid && r.sysid !== 'unknown')
+    if (!items.length) return
+    const latest = items.sort((a,b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    const r = rollid === 1 ? safeFloat(latest?.r1_rad) : safeFloat(latest?.r2_rad)
+    if (r && r > 0) setRadius(r)
+  }, [statusRaw, rollid])
+
+  const sposList = useMemo(() => sposData.map(r => r.spos), [sposData])
+
+  useEffect(() => {
+    if (!sposList.length) return
+    if (liveMode) setSelectedSpos(sposList[sposList.length - 1])
+    else setSelectedSpos(prev => prev && sposList.includes(prev) ? prev : sposList[0])
+  }, [sposList, liveMode])
+
+  const currentIdx = sposList.indexOf(selectedSpos)
+
+  const plotData = useMemo(() => {
+    if (!selectedSpos || !radius) return null
+    const row = sposData.find(r => r.spos === selectedSpos)
+    if (!row) return null
+    const Wraw = parseWearArr(row.rec.wear_data)
+    if (!Wraw.length) return null
+
+    // 5-point smoothing
+    const W    = smoothArr(Wraw)
+    const nPts = W.length
+
+    // r = r1_rad + W[i], theta = ((i)/nPts) * 360 for i=0..nPts-1 (i=1..nPts in PLC)
+    const rVals     = []
+    const thetaVals = []
+    const wVals     = []
+
+    for (let i = 0; i < nPts; i++) {
+      rVals.push(radius + W[i])
+      thetaVals.push((i / nPts) * 360)
+      wVals.push(W[i])
+    }
+
+    // Fix wrap-around spike at 0°/360° only
+    if (rVals.length > 1 && Math.abs(rVals[0] - rVals[rVals.length-1]) > 50) {
+      const avg = (rVals[rVals.length-1] + (rVals[1] || rVals[0])) / 2
+      rVals.splice(0, 1, avg)
+      wVals.splice(0, 1, avg - radius)
+    }
+
+    // Close the loop
+    rVals.push(rVals[0])
+    thetaVals.push(360)
+    wVals.push(wVals[0])
+
+    return { rVals, thetaVals, wVals }
+  }, [selectedSpos, radius, sposData])
+
+  if (!sposData.length) return null
+
+  return (
+    <div style={{ marginTop: '24px', paddingTop: '20px', borderTop: '2px solid #e2e8f0' }}>
+      <div style={{ fontSize: '14px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
+        Polar Cross-Section — Wear Profile (r = r1_rad + W[i])
+      </div>
+      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '12px' }}>
+        <span style={{ color: '#94a3b8', fontWeight: '600' }}>Grey dashed = baseline r1_rad ({radius ?? '...'}mm)</span> ·
+        <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue = r1_rad + W[i]</span> ·
+        W &gt; 0 (buildup) → outside · W &lt; 0 (wear) → inside · 5-pt smoothing
+      </div>
+
+      {/* Spos selector */}
+      <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'12px', flexWrap:'wrap' }}>
+        <button onClick={() => currentIdx > 0 && setSelectedSpos(sposList[currentIdx-1])}
+          disabled={currentIdx <= 0}
+          style={{ padding:'6px 12px', fontSize:'13px', border:'1px solid #e2e8f0', borderRadius:'6px', background: currentIdx<=0?'#f1f5f9':'#fff', cursor: currentIdx<=0?'default':'pointer', fontFamily:'inherit' }}>
+          ◀
+        </button>
+        <select value={selectedSpos ?? ''} onChange={e => setSelectedSpos(parseFloat(e.target.value))}
+          style={{ padding:'6px 12px', fontSize:'13px', border:'1px solid #e2e8f0', borderRadius:'6px', background:'#fff', fontFamily:'inherit' }}>
+          {sposList.map(s => <option key={s} value={s}>spos = {s}mm</option>)}
+        </select>
+        <button onClick={() => currentIdx < sposList.length-1 && setSelectedSpos(sposList[currentIdx+1])}
+          disabled={currentIdx >= sposList.length-1}
+          style={{ padding:'6px 12px', fontSize:'13px', border:'1px solid #e2e8f0', borderRadius:'6px', background: currentIdx>=sposList.length-1?'#f1f5f9':'#fff', cursor: currentIdx>=sposList.length-1?'default':'pointer', fontFamily:'inherit' }}>
+          ▶
+        </button>
+        <span style={{ fontSize:'11px', color:'#94a3b8' }}>{currentIdx+1} of {sposList.length}</span>
+        {liveMode && <span style={{ fontSize:'11px', color:'#22c55e', fontWeight:'600' }}>● Auto-tracking latest</span>}
+      </div>
+
+      {plotData && radius ? (
+        <Plot
+          data={[
+            // Grey dashed baseline circle at r1_rad
+            {
+              type: 'scatterpolar',
+              mode: 'lines',
+              r:     Array(37).fill(radius),
+              theta: Array.from({length:37}, (_,i) => i*10),
+              name:  `Radius ${radius}mm`,
+              line:  { color: '#94a3b8', width: 1.5, dash: 'dash' },
+              hoverinfo: 'skip',
+            },
+            // Blue profile: r = r1_rad + W[i]
+            {
+              type: 'scatterpolar',
+              mode: 'lines+markers',
+              r:     plotData.rVals,
+              theta: plotData.thetaVals,
+              name:  'Wear profile',
+              line:  { color: '#1d4ed8', width: 2 },
+              marker: { size: 3, color: '#1d4ed8', opacity: 0 },
+              fill:  'toself',
+              fillcolor: 'rgba(29,78,216,0.06)',
+              customdata: plotData.wVals,
+              hovertemplate: 'spos=' + String(selectedSpos) + 'mm<br>θ=%{theta:.1f}°<br>W=%{customdata:.3f}mm<extra></extra>',
+              hoveron: 'points+fills',
+            },
+          ]}
+          layout={{
+            hovermode: 'closest',
+            polar: {
+              radialaxis: {
+                visible: true,
+                range:   [(radius || 850) - 100, (radius || 850) + 35],
+                title:   '',
+                tickvals: [(radius || 850)],
+                ticktext: [(radius || 850) + 'mm'],
+                tickfont: { size: 10, color: '#64748b' },
+                gridcount: 1,
+                gridcolor: 'rgba(148,163,184,0.3)',
+              },
+              angularaxis: {
+                direction: 'clockwise',
+                rotation:  90,
+                color:     '#64748b',
+                tickfont:  { size: 10 },
+                dtick:     45,
+                showline:  false,
+                showgrid:  false,
+              },
+            },
+            showlegend:    true,
+            legend:        { orientation:'h', y:-0.15, font:{ size:11 } },
+            margin:        { l:60, r:60, t:30, b:80 },
+            paper_bgcolor: 'transparent',
+            height:        500,
+          }}
+          config={{ responsive:true, displayModeBar:true, displaylogo:false }}
+          style={{ width:'100%' }}
+        />
+      ) : (
+        <div style={{ padding:'2rem', textAlign:'center', color:'#94a3b8', fontSize:'13px' }}>
+          {!radius ? 'Fetching radius from Status table...' : 'Select a spos position'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Stat Card ─────────────────────────────────────────────────// ── Stat Card ─────────────────────────────────────────────────
 function StatCard({ label, value, unit, sub, color }) {
   return (
     <div style={{
@@ -366,19 +815,37 @@ export default function WearResults() {
   async function handleStart() {
     setActionLoading(true); setActionMsg(null)
     const res = await postMeasStart(sysid)
-    if (res?.error) setActionMsg({ type: 'error', text: res.error })
-    else { setActionMsg({ type: 'success', text: 'Measurement started' }); refreshStarted() }
-    setActionLoading(false)
-    setTimeout(() => setActionMsg(null), 3000)
+    if (res?.error) {
+      setActionMsg({ type: 'error', text: res.error })
+      setActionLoading(false)
+    } else {
+      setActionMsg({ type: 'success', text: 'MeasStart sent — waiting for PLC confirmation...' })
+      setActionLoading(false)
+      // Wait 8s for PLC to react and write to DynamoDB before refreshing
+      setTimeout(() => {
+        refreshStarted()
+        refreshFinished()
+        setActionMsg(null)
+      }, 8000)
+    }
   }
 
   async function handleStop() {
     setActionLoading(true); setActionMsg(null)
     const res = await postMeasStop(sysid)
-    if (res?.error) setActionMsg({ type: 'error', text: res.error })
-    else { setActionMsg({ type: 'success', text: 'Measurement stopped' }); refreshFinished() }
-    setActionLoading(false)
-    setTimeout(() => setActionMsg(null), 3000)
+    if (res?.error) {
+      setActionMsg({ type: 'error', text: res.error })
+      setActionLoading(false)
+    } else {
+      setActionMsg({ type: 'success', text: 'MeasStop sent — waiting for PLC confirmation...' })
+      setActionLoading(false)
+      // Wait 8s for PLC to react and write to DynamoDB before refreshing
+      setTimeout(() => {
+        refreshStarted()
+        refreshFinished()
+        setActionMsg(null)
+      }, 8000)
+    }
   }
 
   // ── Mode: live or historical ──────────────────────────────
@@ -780,8 +1247,24 @@ export default function WearResults() {
             <Line data={wData} options={commonOpts('Wear W[i] (mm)')} />
           </div>
 
-          {/* Heatmap — below W[i] chart, same X axis */}
-          <WearHeatmap sposData={sposData} />
+          {/* 1. Plotly Heatmap */}
+          <PlotlyHeatmap sposData={sposData} />
+
+          {/* 2. Wear Polar — r = r1_rad + W[i] */}
+          <WearPolarPlot
+            sposData={sposData}
+            rollid={rollid}
+            sysid={sysid}
+            liveMode={mode === 'live'}
+          />
+
+          {/* 3. S[i] Polar — r = r1_rad - S[i] */}
+          <PlotlyPolarPlot
+            sposData={sposData}
+            rollid={rollid}
+            sysid={sysid}
+            liveMode={mode === 'live'}
+          />
 
           <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px', textAlign: 'right' }}>
             Last data: {fmtDt(lastRecordDt)} · {records.length} records · {sposData.length} spos positions
