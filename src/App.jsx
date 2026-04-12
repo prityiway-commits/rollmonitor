@@ -51,7 +51,16 @@ function RoleBadge({ role }) {
 }
 
 function Sidebar() {
-  const { user, logout } = useAuth()
+  const { user, logout, authCall } = useAuth()
+  const [customerLogo, setCustomerLogo] = React.useState(null)
+
+  React.useEffect(() => {
+    if (!user?.customerId || !authCall) return
+    authCall('get_logo', { customerId: user.customerId }).then(({ data }) => {
+      setCustomerLogo(data?.logo || null)
+    })
+  }, [user?.customerId])
+
   return (
     <aside style={{
       width: '220px', minWidth: '220px', minHeight: '100vh',
@@ -60,9 +69,16 @@ function Sidebar() {
       boxShadow: '4px 0 24px rgba(29,111,189,0.18)', position: 'relative', zIndex: 10,
     }}>
       {/* Logo */}
-      <div style={{ padding: '24px 20px 20px', borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
+      <div style={{ padding: '16px 20px 20px', borderBottom: '1px solid rgba(255,255,255,0.12)' }}>
+        {/* Customer logo — above everything, auto-resizes */}
+        {customerLogo && (
+          <div style={{ marginBottom: '12px', padding: '8px', background: '#ffffff', borderRadius: '8px', boxShadow: '0 1px 4px rgba(0,0,0,0.15)' }}>
+            <img src={customerLogo} alt="Customer logo"
+              style={{ width: '100%', height: 'auto', maxHeight: '70px', minHeight: '24px', objectFit: 'contain', display: 'block' }} />
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px' }}>
-          <div style={{ width: '36px', height: '36px', background: 'rgba(255,255,255,0.15)', borderRadius: '9px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ width: '36px', height: '36px', background: 'rgba(255,255,255,0.15)', borderRadius: '9px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="12" r="9" stroke="white" strokeWidth="1.5"/>
               <circle cx="12" cy="12" r="4" stroke="white" strokeWidth="1.5"/>
@@ -70,8 +86,8 @@ function Sidebar() {
             </svg>
           </div>
           <div>
-            <div style={{ color: '#fff', fontWeight: '700', fontSize: '15px', lineHeight: '1.1' }}>RollMonitor</div>
-            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '9px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Industrial IoT</div>
+            <div style={{ color: '#fff', fontWeight: '700', fontSize: '15px', lineHeight: '1.1' }}>Wear Measurement</div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '9px', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Roller Monitor</div>
           </div>
         </div>
         {/* User info */}
@@ -126,7 +142,7 @@ function Sidebar() {
         </button>
         <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', gap: '7px', paddingLeft: '2px' }}>
           <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 6px #4ade80' }} />
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: '10px' }}>AWS IoT · ap-south-1</div>
+
         </div>
       </div>
     </aside>
@@ -145,15 +161,12 @@ function Layout({ children }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '0 28px', position: 'sticky', top: 0, zIndex: 9, boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ color: '#94a3b8', fontSize: '13px' }}>RollMonitor</span>
+            <span style={{ color: '#94a3b8', fontSize: '13px' }}>Wear Measurement</span>
             <span style={{ color: '#cbd5e1' }}>/</span>
             <span style={{ color: '#1e293b', fontSize: '13px', fontWeight: '600' }}>{page.label}</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#22c55e', animation: 'pulse 2s infinite' }} />
-              <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '500' }}>Live</span>
-            </div>
+
 
           </div>
         </header>

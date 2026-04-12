@@ -62,6 +62,9 @@ export default function AdminPanel() {
   const [msg,     setMsg]     = useState(null)
   const [error,   setError]   = useState(null)
 
+  // Edit states
+  const [editItem, setEditItem] = useState(null)  // { type, data }
+
   // Form states
   const [newCustomer,  setNewCustomer]  = useState({ name: '', country: '', contact: '' })
   const [newRegion,    setNewRegion]    = useState({ customerId: '', name: '', description: '' })
@@ -90,6 +93,32 @@ export default function AdminPanel() {
     setMsg(`✓ ${action.replace('_', ' ')} successful`)
     if (resetFn) resetFn()
     loadOrg(); loadUsers()
+  }
+
+  async function editEntity(type, data) {
+    setEditItem({ type, data: { ...data } })
+  }
+
+  async function saveEdit() {
+    if (!editItem) return
+    const { type, data } = editItem
+    const action = `update_${type}`
+    const { error: e } = await authCall(action, data)
+    if (e) { setError(e); return }
+    setMsg(`✓ ${type} updated successfully`)
+    setEditItem(null)
+    loadOrg()
+  }
+
+  async function deleteEntity(type, customerId, entityId, name) {
+    if (!window.confirm(`Delete "${name}"? This cannot be undone.`)) return
+    const body = type === 'customer'
+      ? { customerId }
+      : { customerId, entityId }
+    const { error: e } = await authCall(`delete_${type}`, body)
+    if (e) { setError(e); return }
+    setMsg(`✓ ${type} deleted successfully`)
+    loadOrg()
   }
 
   async function toggleUser(u) {
@@ -172,12 +201,78 @@ export default function AdminPanel() {
           <div className="card">
             <SectionHead title="Existing Customers" />
             {loading ? <Spinner /> : org?.tree?.map(c => (
-              <div key={c.customerId} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                <div style={{ fontSize: '13px', fontWeight: '600', color: '#1e293b' }}>{c.name}</div>
-                <div style={{ fontSize: '11px', color: '#94a3b8', fontFamily: 'monospace' }}>{c.customerId}</div>
-                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
-                  {c.regions?.length || 0} regions · {c.plants?.length || 0} plants
-                </div>
+              <div key={c.customerId} style={{ padding:'10px 0', borderBottom:'1px solid #f1f5f9' }}>
+                {editItem?.type === 'customer' && editItem.data.customerId === c.customerId ? (
+                  <div>
+                    <Field label="Name"><Input value={editItem.data.name} onChange={v => setEditItem(p=>({...p,data:{...p.data,name:v}}))} /></Field>
+                    <Field label="Country"><Input value={editItem.data.country||''} onChange={v => setEditItem(p=>({...p,data:{...p.data,country:v}}))} /></Field>
+                    <Field label="Contact"><Input value={editItem.data.contact||''} onChange={v => setEditItem(p=>({...p,data:{...p.data,contact:v}}))} /></Field>
+                    <div style={{ display:'flex', gap:'8px', marginTop:'8px' }}>
+                      <button className="btn-primary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={saveEdit}>Save</button>
+                      <button className="btn-secondary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={() => setEditItem(null)}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+                      <div>
+                        <div style={{ fontSize:'13px', fontWeight:'600', color:'#1e293b' }}>{c.name}</div>
+                        <div style={{ fontSize:'11px', color:'#94a3b8', fontFamily:'monospace' }}>{c.customerId}</div>
+                        <div style={{ fontSize:'11px', color:'#64748b', marginTop:'2px' }}>{c.regions?.length||0} regions · {c.plants?.length||0} plants</div>
+                      </div>
+                      <div style={{ display:'flex', gap:'6px' }}>
+                        <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', cursor:'pointer', color:'#1d4ed8' }}
+                          onClick={() => editEntity('customer', { customerId:c.customerId, name:c.name, country:c.country||'', contact:c.contact||'' })}>
+                          Edit
+                        </button>
+                        <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #fecaca', background:'#fff5f5', cursor:'pointer', color:'#dc2626' }}
+                          onClick={() => deleteEntity('customer', c.customerId, null, c.name)}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                    {/* Logo upload */}
+                    <div style={{ marginTop:'10px', padding:'10px', background:'#f8fafc', borderRadius:'8px', border:'1px dashed #e2e8f0' }}>
+                      <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748b', marginBottom:'8px', textTransform:'uppercase', letterSpacing:'0.05em' }}>Customer Logo</div>
+                      {c.logo ? (
+                        <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+                          <img src={c.logo} alt="logo"
+                            style={{ maxWidth:'100%', maxHeight:'60px', width:'auto', height:'auto', objectFit:'contain', borderRadius:'4px', border:'1px solid #e2e8f0' }} />
+                          <button
+                            onClick={async () => {
+                              await authCall('delete_logo', { customerId: c.customerId })
+                              setMsg('Logo removed'); loadOrg()
+                            }}
+                            style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #fecaca', background:'#fff5f5', cursor:'pointer', color:'#dc2626' }}>
+                            Remove
+                          </button>
+                        </div>
+                      ) : (
+                        <label style={{ cursor:'pointer', display:'flex', alignItems:'center', gap:'8px' }}>
+                          <div style={{ fontSize:'12px', padding:'6px 12px', borderRadius:'6px', border:'1px solid #bfdbfe', background:'#eff6ff', color:'#1d4ed8', cursor:'pointer' }}>
+                            Upload JPEG
+                          </div>
+                          <span style={{ fontSize:'11px', color:'#94a3b8' }}>No logo uploaded</span>
+                          <input type="file" accept="image/jpeg,image/jpg,image/png"
+                            style={{ display:'none' }}
+                            onChange={async e => {
+                              const file = e.target.files[0]
+                              if (!file) return
+                              const reader = new FileReader()
+                              reader.onload = async ev => {
+                                const b64 = ev.target.result
+                                const { error: er } = await authCall('upload_logo', { customerId: c.customerId, logo: b64 })
+                                if (er) setError(er)
+                                else { setMsg('Logo uploaded successfully'); loadOrg() }
+                              }
+                              reader.readAsDataURL(file)
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -200,9 +295,35 @@ export default function AdminPanel() {
           <div className="card">
             <SectionHead title="Existing Regions" />
             {org?.tree?.flatMap(c => (c.regions||[]).map(r => (
-              <div key={r.entityId} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                <div style={{ fontSize: '13px', fontWeight: '600', color: '#1e293b' }}>{r.name}</div>
-                <div style={{ fontSize: '11px', color: '#94a3b8' }}>{c.name} · <span style={{ fontFamily: 'monospace' }}>{r.entityId}</span></div>
+              <div key={r.entityId} style={{ padding:'10px 0', borderBottom:'1px solid #f1f5f9' }}>
+                {editItem?.type === 'region' && editItem.data.entityId === r.entityId ? (
+                  <div>
+                    <Field label="Name"><Input value={editItem.data.name} onChange={v => setEditItem(p=>({...p,data:{...p.data,name:v}}))} /></Field>
+                    <Field label="Description"><Input value={editItem.data.description||''} onChange={v => setEditItem(p=>({...p,data:{...p.data,description:v}}))} /></Field>
+                    <div style={{ display:'flex', gap:'8px', marginTop:'8px' }}>
+                      <button className="btn-primary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={saveEdit}>Save</button>
+                      <button className="btn-secondary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={() => setEditItem(null)}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+                    <div>
+                      <div style={{ fontSize:'13px', fontWeight:'600', color:'#1e293b' }}>{r.name}</div>
+                      <div style={{ fontSize:'11px', color:'#94a3b8' }}>{c.name} · <span style={{ fontFamily:'monospace' }}>{r.entityId}</span></div>
+                      {r.description && <div style={{ fontSize:'11px', color:'#64748b', marginTop:'2px' }}>{r.description}</div>}
+                    </div>
+                    <div style={{ display:'flex', gap:'6px' }}>
+                      <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', cursor:'pointer', color:'#1d4ed8' }}
+                        onClick={() => editEntity('region', { customerId:c.customerId, entityId:r.entityId, name:r.name, description:r.description||'' })}>
+                        Edit
+                      </button>
+                      <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #fecaca', background:'#fff5f5', cursor:'pointer', color:'#dc2626' }}
+                        onClick={() => deleteEntity('region', c.customerId, r.entityId, r.name)}>
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )))}
           </div>
@@ -236,16 +357,47 @@ export default function AdminPanel() {
             {org?.tree?.flatMap(c => (c.plants||[]).map(p => {
               const region = (c.regions||[]).find(r => r.entityId === p.regionId)
               return (
-                <div key={p.entityId} style={{ padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                  <div style={{ fontSize: '13px', fontWeight: '600', color: '#1e293b' }}>{p.name}</div>
-                  <div style={{ fontSize: '11px', color: '#64748b' }}>{c.name} › {region?.name || p.regionId}</div>
-                  <div style={{ fontSize: '11px', color: '#94a3b8', fontFamily: 'monospace', marginTop: '2px' }}>
-                    {(p.sysids||[]).join(', ') || 'No devices assigned'}
-                  </div>
+                <div key={p.entityId} style={{ padding:'10px 0', borderBottom:'1px solid #f1f5f9' }}>
+                  {editItem?.type === 'plant' && editItem.data.entityId === p.entityId ? (
+                    <div>
+                      <Field label="Name"><Input value={editItem.data.name} onChange={v => setEditItem(prev=>({...prev,data:{...prev.data,name:v}}))} /></Field>
+                      <Field label="Location"><Input value={editItem.data.location||''} onChange={v => setEditItem(prev=>({...prev,data:{...prev.data,location:v}}))} /></Field>
+                      <Field label="Device sysids (comma separated)">
+                        <input value={(editItem.data.sysids||[]).join(', ')}
+                          onChange={e => setEditItem(prev=>({...prev,data:{...prev.data,sysids:e.target.value.split(',').map(s=>s.trim()).filter(Boolean)}}))}
+                          className="input-field" style={{ fontFamily:'monospace', fontSize:'12px' }} />
+                      </Field>
+                      <div style={{ display:'flex', gap:'8px', marginTop:'8px' }}>
+                        <button className="btn-primary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={saveEdit}>Save</button>
+                        <button className="btn-secondary" style={{ fontSize:'12px', padding:'4px 12px' }} onClick={() => setEditItem(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start' }}>
+                      <div>
+                        <div style={{ fontSize:'13px', fontWeight:'600', color:'#1e293b' }}>{p.name}</div>
+                        <div style={{ fontSize:'11px', color:'#64748b' }}>{c.name} › {region?.name || p.regionId}</div>
+                        <div style={{ fontSize:'11px', color:'#94a3b8', fontFamily:'monospace', marginTop:'2px' }}>
+                          {(p.sysids||[]).join(', ') || 'No devices assigned'}
+                        </div>
+                      </div>
+                      <div style={{ display:'flex', gap:'6px' }}>
+                        <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #e2e8f0', background:'#f8fafc', cursor:'pointer', color:'#1d4ed8' }}
+                          onClick={() => editEntity('plant', { customerId:c.customerId, entityId:p.entityId, name:p.name, location:p.location||'', sysids:p.sysids||[] })}>
+                          Edit
+                        </button>
+                        <button style={{ fontSize:'11px', padding:'3px 8px', borderRadius:'6px', border:'1px solid #fecaca', background:'#fff5f5', cursor:'pointer', color:'#dc2626' }}
+                          onClick={() => deleteEntity('plant', c.customerId, p.entityId, p.name)}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )
             }))}
           </div>
+
         </div>
       )}
 

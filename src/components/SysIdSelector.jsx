@@ -1,23 +1,18 @@
 /**
  * SysIdSelector.jsx
  * Dropdown to select the active device (sysid).
- * Fetches all available sysids from the API on mount.
- * Stores the selected sysid in localStorage so it persists across pages.
+ * Admin role → fetches all sysids from API
+ * Other roles → uses user's assigned sysids from login
  */
 import React, { useState, useEffect } from 'react'
+import { useAuth } from '../context/AuthContext'
 import { fetchSysIds } from '../services/api'
 
 const STORAGE_KEY = 'rollmonitor_sysid'
 
-// Known sysids from your DynamoDB data as fallback
-const FALLBACK_SYSIDS = [
-  '5.155.177.97.1.1',
-  '5.143.135.82.1.1',
-]
-
 export function useSysId() {
   const [sysid, setSysIdState] = useState(
-    () => localStorage.getItem(STORAGE_KEY) || FALLBACK_SYSIDS[0]
+    () => localStorage.getItem(STORAGE_KEY) || ''
   )
 
   function setSysId(id) {
@@ -29,26 +24,53 @@ export function useSysId() {
 }
 
 export default function SysIdSelector({ value, onChange }) {
-  const [options,  setOptions]  = useState(FALLBACK_SYSIDS)
-  const [loading,  setLoading]  = useState(false)
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+
+  const [options, setOptions] = useState([])
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    async function load() {
+    if (isAdmin) {
       setLoading(true)
-      const { data } = await fetchSysIds()
-      if (data?.sysids && data.sysids.length > 0) {
-        // Merge API results with fallbacks, remove duplicates
-        const merged = [...new Set([...data.sysids, ...FALLBACK_SYSIDS])]
-        setOptions(merged.sort())
+      fetchSysIds().then(({ data }) => {
+        const sysids = (data?.sysids || []).filter(Boolean).sort()
+        setOptions(sysids)
+        if (sysids.length > 0 && (!value || !sysids.includes(value))) {
+          onChange(sysids[0])
+        }
+        setLoading(false)
+      })
+    } else {
+      const assigned = (user?.sysids || []).filter(Boolean).sort()
+      setOptions(assigned)
+      if (assigned.length === 0) {
+        // Clear any stale sysid from localStorage
+        localStorage.removeItem('rollmonitor_sysid')
+        onChange('')
+      } else if (!value || !assigned.includes(value)) {
+        // Clear stale value and select first assigned
+        onChange(assigned[0])
       }
-      setLoading(false)
     }
-    load()
-  }, [])
+  }, [user?.role, (user?.sysids||[]).join(',')])
+
+  if (options.length === 0 && !loading) {
+    return (
+      <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+        <span style={{ fontSize:'11px', fontWeight:'700', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.06em' }}>
+          Device
+        </span>
+        <span style={{ fontSize:'13px', color:'#dc2626', fontStyle:'italic' }}>
+          {isAdmin ? 'No devices found' : 'No devices assigned — contact admin'}
+        </span>
+      </div>
+    )
+  }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-      <span style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+    <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+      <span style={{ fontSize:'11px', fontWeight:'700', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.06em' }}>
         Device
       </span>
       <select
@@ -71,7 +93,7 @@ export default function SysIdSelector({ value, onChange }) {
           <option key={s} value={s}>{s}</option>
         ))}
       </select>
-      {loading && <span style={{ fontSize: '11px', color: '#94a3b8' }}>Loading devices…</span>}
+      {loading && <span style={{ fontSize:'11px', color:'#94a3b8' }}>Loading…</span>}
     </div>
   )
 }

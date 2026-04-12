@@ -1094,6 +1094,15 @@ export default function WearResults() {
     outline: 'none', fontFamily: 'inherit',
   }
 
+  // No device assigned to this user
+  if (!sysid) return (
+    <div style={{ padding:'3rem', textAlign:'center', background:'#fff', borderRadius:'12px', border:'1px solid #e2e8f0' }}>
+      <div style={{ fontSize:'40px', marginBottom:'12px' }}>🔌</div>
+      <div style={{ fontSize:'16px', fontWeight:'600', color:'#1e293b', marginBottom:'8px' }}>No Device Assigned</div>
+      <div style={{ fontSize:'13px', color:'#94a3b8' }}>Your account has no devices assigned. Please contact your administrator.</div>
+    </div>
+  )
+
   return (
     <div style={{ maxWidth: '1100px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
