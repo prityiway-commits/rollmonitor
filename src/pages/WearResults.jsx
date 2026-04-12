@@ -410,21 +410,34 @@ function PlotlyHeatmap({ sposData }) {
           hovertemplate: 'spos=%{x}mm<br>i=%{y}<br>W=%{z:.3f}mm<extra></extra>',
         }]}
         layout={{
-          margin:      { l: 60, r: 80, t: 20, b: 60 },
-          xaxis:       { title: { text: 'Axial position (spos mm)' }, color: '#64748b' },
-          yaxis:       { title: { text: 'Array index i' }, color: '#64748b' },
-          paper_bgcolor: 'transparent',
-          plot_bgcolor:  '#fafafa',
-          height:        450,
+          margin: { l: 60, r: 80, t: 20, b: 80 },
           xaxis: {
             title: { text: 'Axial position (spos mm)' },
             color: '#64748b',
             rangeslider: { visible: true, thickness: 0.05 },
           },
+          yaxis: {
+            title: { text: 'Array index i' },
+            color: '#64748b',
+            autorange: true,
+            fixedrange: false,
+          },
+          paper_bgcolor: 'transparent',
+          plot_bgcolor:  '#fafafa',
+          height:        500,
         }}
-        config={{ responsive: true, displayModeBar: true, displaylogo: false }}
+        config={{
+          responsive: true,
+          displayModeBar: true,
+          displaylogo: false,
+          scrollZoom: true,
+          modeBarButtonsToAdd: ['zoom2d', 'pan2d', 'resetScale2d'],
+        }}
         style={{ width: '100%' }}
       />
+      <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'4px' }}>
+        Scroll over Y axis to zoom array index range · Scroll over X axis to zoom spos range · Drag to pan
+      </div>
     </div>
   )
 }
@@ -1109,7 +1122,15 @@ export default function WearResults() {
           {/* Live / Historical toggle */}
           <div style={{ display: 'flex', gap: '0', border: '1.5px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden' }}>
             {['live', 'historical'].map(m => (
-              <button key={m} onClick={() => setMode(m)}
+              <button key={m} onClick={() => {
+                setMode(m)
+                if (m === 'historical') {
+                  const now = new Date()
+                  setHistTo(now.toISOString().slice(0, 16))
+                  const from = new Date(now); from.setHours(from.getHours() - 2)
+                  setHistFrom(from.toISOString().slice(0, 16))
+                }
+              }}
                 style={{
                   padding: '8px 20px', fontSize: '13px', fontWeight: mode === m ? '700' : '400',
                   background: mode === m ? '#1d4ed8' : '#fff',
@@ -1295,13 +1316,7 @@ export default function WearResults() {
             liveMode={mode === 'live'}
           />
 
-          {/* 3. S[i] Polar — r = r1_rad - S[i] */}
-          <PlotlyPolarPlot
-            sposData={sposData}
-            rollid={rollid}
-            sysid={sysid}
-            liveMode={mode === 'live'}
-          />
+
 
           <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px', textAlign: 'right' }}>
             Last data: {fmtDt(lastRecordDt)} · {records.length} records · {sposData.length} spos positions
