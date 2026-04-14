@@ -31,9 +31,33 @@ import { Spinner, ErrorBanner, SectionHead } from '../components'
 import SysIdSelector, { useSysId } from '../components/SysIdSelector'
 import { useRollNames } from '../components/RollNameContext'
 import { loadSettings } from '../services/analytics'
-import Plot from 'react-plotly.js'
+import Plotly from 'plotly.js-dist-min'
+import createPlotlyComponent from 'react-plotly.js/factory'
+const Plot = createPlotlyComponent(Plotly)
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, zoomPlugin)
+// Simple error boundary to catch Plotly/Chart crashes without crashing the whole page
+class ChartErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null } }
+  static getDerivedStateFromError(error) { return { hasError: true, error } }
+  componentDidCatch(error, info) { console.error('[ChartErrorBoundary]', error, info) }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding:'1rem', background:'#fff5f5', border:'1px solid #fecaca', borderRadius:'8px', fontSize:'12px', color:'#dc2626', marginTop:'16px' }}>
+          Chart error: {String(this.state.error?.message || 'Unknown error')}
+          <button onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ marginLeft:'12px', fontSize:'11px', padding:'2px 8px', border:'1px solid #fecaca', borderRadius:'4px', cursor:'pointer', background:'#fff' }}>
+            Retry
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+
 
 const GET_BASE = 'https://yf8rql6c0c.execute-api.ap-south-1.amazonaws.com/dashboard'
 
@@ -345,25 +369,30 @@ function WearHeatmap({ sposData }) {
 // ── Plotly Heatmap ───────────────────────────────────────────
 function PlotlyHeatmap({ sposData }) {
   const plotData = useMemo(() => {
-    if (!sposData || !sposData.length) return null
-    const xLabels = sposData.map(r => r.spos)
-    const nPts    = sposData[0]?.rec ? parseWearArr(sposData[0].rec.wear_data).length : 100
-    const yLabels = Array.from({ length: nPts }, (_, i) => i + 1) // 1..nPts
+    try {
+      if (!sposData || !sposData.length) return null
+      const xLabels = sposData.map(r => r.spos)
 
-    // Build Z matrix: rows=index(1..nPts), cols=spos
-    // Z[row][col] = W[row] at spos[col]
-    // Use max nPts across all records to avoid out-of-bounds
-    const allNpts = sposData.map(r => parseWearArr(r.rec.wear_data).length)
-    const maxNpts = Math.max(...allNpts)
-    const Z = Array.from({ length: maxNpts }, () => new Array(sposData.length).fill(null))
-    sposData.forEach((r, ci) => {
-      const W = parseWearArr(r.rec.wear_data)
-      W.forEach((w, i) => {
-        if (i < maxNpts && Z[i]) Z[i][ci] = w
+      // Use max nPts across all records to avoid out-of-bounds
+      const allNpts = sposData.map(r => parseWearArr(r?.rec?.wear_data).length).filter(n => n > 0)
+      if (!allNpts.length) return null
+      const maxNpts = Math.max(...allNpts)
+      const yLabels = Array.from({ length: maxNpts }, (_, i) => i + 1)
+
+      // Build Z matrix: rows=index(1..maxNpts), cols=spos
+      const Z = Array.from({ length: maxNpts }, () => new Array(sposData.length).fill(null))
+      sposData.forEach((r, ci) => {
+        const W = parseWearArr(r?.rec?.wear_data)
+        W.forEach((w, i) => {
+          if (i < maxNpts && Z[i]) Z[i][ci] = w
+        })
       })
-    })
 
-    return { xLabels, yLabels, Z }
+      return { xLabels, yLabels, Z }
+    } catch(e) {
+      console.error('[PlotlyHeatmap] error building plotData:', e)
+      return null
+    }
   }, [sposData])
 
   if (!plotData) return null
@@ -628,8 +657,23 @@ function smoothArr(arr, half=2) {
 
 function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
   const [selectedSpos, setSelectedSpos] = useState(null)
-  const [radius,       setRadius]       = useState(null)
 
+  // Get radius — try localStorage MeasConfig first (instant), then Status table
+  const radius = useMemo(() => {
+    try {
+      const saved = localStorage.getItem(`rollmonitor_measconfig_${sysid}`)
+      if (saved) {
+        const cfg = JSON.parse(saved)
+        const r = rollid === 1 ? safeFloat(cfg.r1_rad) : safeFloat(cfg.r2_rad)
+        if (r && r > 0) return r
+      }
+    } catch {}
+    return null
+  }, [sysid, rollid])
+
+  // Also try from sposData records directly (aParam/bParam/cParam won't have r1_rad)
+  // If no radius from config, try from the record's status fields if available
+  const [statusRadius, setStatusRadius] = useState(null)
   const statusFrom = useMemo(() => {
     const d = new Date(); d.setHours(d.getHours() - 24); return d.toISOString()
   }, [])
@@ -641,8 +685,11 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
     if (!items.length) return
     const latest = items.sort((a,b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
     const r = rollid === 1 ? safeFloat(latest?.r1_rad) : safeFloat(latest?.r2_rad)
-    if (r && r > 0) setRadius(r)
+    if (r && r > 0) setStatusRadius(r)
   }, [statusRaw, rollid])
+
+  // Use localStorage radius first, fall back to status table
+  const effectiveRadius = radius || statusRadius
 
   const sposList = useMemo(() => sposData.map(r => r.spos), [sposData])
 
@@ -655,7 +702,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
   const currentIdx = sposList.indexOf(selectedSpos)
 
   const plotData = useMemo(() => {
-    if (!selectedSpos || !radius) return null
+    if (!selectedSpos || !effectiveRadius) return null
     const row = sposData.find(r => r.spos === selectedSpos)
     if (!row) return null
     const Wraw = parseWearArr(row.rec.wear_data)
@@ -671,7 +718,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
     const wVals     = []
 
     for (let i = 0; i < nPts; i++) {
-      rVals.push(radius + W[i])
+      rVals.push(effectiveRadius + W[i])
       thetaVals.push((i / nPts) * 360)
       wVals.push(W[i])
     }
@@ -689,7 +736,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
     wVals.push(wVals[0])
 
     return { rVals, thetaVals, wVals }
-  }, [selectedSpos, radius, sposData])
+  }, [selectedSpos, effectiveRadius, sposData])
 
   if (!sposData.length) return null
 
@@ -724,7 +771,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
         {liveMode && <span style={{ fontSize:'11px', color:'#22c55e', fontWeight:'600' }}>● Auto-tracking latest</span>}
       </div>
 
-      {plotData && radius ? (
+      {plotData && effectiveRadius ? (
         <Plot
           data={[
             // Grey dashed baseline circle at r1_rad
@@ -733,7 +780,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
               mode: 'lines',
               r:     Array(37).fill(radius),
               theta: Array.from({length:37}, (_,i) => i*10),
-              name:  `Radius ${radius}mm`,
+              name:  `Radius ${effectiveRadius}mm`,
               line:  { color: '#94a3b8', width: 1.5, dash: 'dash' },
               hoverinfo: 'skip',
             },
@@ -758,10 +805,10 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
             polar: {
               radialaxis: {
                 visible: true,
-                range:   [(radius || 850) - 100, (radius || 850) + 35],
+                range:   [(effectiveRadius || 850) - 100, (effectiveRadius || 850) + 35],
                 title:   '',
-                tickvals: [(radius || 850)],
-                ticktext: [(radius || 850) + 'mm'],
+                tickvals: [(effectiveRadius || 850)],
+                ticktext: [(effectiveRadius || 850) + 'mm'],
                 tickfont: { size: 10, color: '#64748b' },
                 gridcount: 1,
                 gridcolor: 'rgba(148,163,184,0.3)',
@@ -787,7 +834,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
         />
       ) : (
         <div style={{ padding:'2rem', textAlign:'center', color:'#94a3b8', fontSize:'13px' }}>
-          {!radius ? 'Fetching radius from Status table...' : 'Select a spos position'}
+          {!effectiveRadius ? 'Fetching radius from Status table...' : 'Select a spos position'}
         </div>
       )}
     </div>
@@ -1292,17 +1339,11 @@ export default function WearResults() {
           </div>
 
           {/* Chart 1: S[i] and C[i] */}
-          <div style={{ height: '280px', marginBottom: '8px' }}>
-            <Line id="scChart" data={scData} options={commonOpts('Distance (mm)', sensorRange.min, sensorRange.max)} />
-          </div>
-          <div style={{ display:'flex', justifyContent:'flex-end', marginTop:'4px' }}>
-            <button onClick={() => {
-              const chart = ChartJS.getChart('scChart')
-              if (chart) chart.resetZoom()
-            }} style={{ fontSize:'11px', padding:'4px 10px', border:'1px solid #e2e8f0', borderRadius:'6px', background:'#fff', cursor:'pointer', color:'#64748b', fontFamily:'inherit' }}>
-              ↺ Reset zoom
-            </button>
-          </div>
+          <ChartErrorBoundary>
+            <div style={{ height: '280px', marginBottom: '8px' }}>
+              <Line data={scData} options={commonOpts('Distance (mm)', sensorRange.min, sensorRange.max)} />
+            </div>
+          </ChartErrorBoundary>
 
           <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '20px', marginBottom: '8px', lineHeight: '1.6' }}>
             <span style={{ color: '#1d6fbd', fontWeight: '600' }}>Blue = W[i] = S[i] − C[i]</span> ·
@@ -1310,20 +1351,26 @@ export default function WearResults() {
           </div>
 
           {/* Chart 2: W[i] */}
-          <div style={{ height: '220px' }}>
-            <Line data={wData} options={commonOpts('Wear W[i] (mm)')} />
-          </div>
+          <ChartErrorBoundary>
+            <div style={{ height: '220px' }}>
+              <Line data={wData} options={commonOpts('Wear W[i] (mm)')} />
+            </div>
+          </ChartErrorBoundary>
 
           {/* 1. Plotly Heatmap */}
-          <PlotlyHeatmap sposData={sposData} />
+          <ChartErrorBoundary>
+            <PlotlyHeatmap sposData={sposData} />
+          </ChartErrorBoundary>
 
           {/* 2. Wear Polar — r = r1_rad + W[i] */}
-          <WearPolarPlot
-            sposData={sposData}
-            rollid={rollid}
-            sysid={sysid}
-            liveMode={mode === 'live'}
-          />
+          <ChartErrorBoundary>
+            <WearPolarPlot
+              sposData={sposData}
+              rollid={rollid}
+              sysid={sysid}
+              liveMode={mode === 'live'}
+            />
+          </ChartErrorBoundary>
 
 
 
