@@ -24,7 +24,8 @@ export function useApi(apiFn, args = [], options = {}) {
     setLoading(true)
     setError(null)
     const { data: d, error: e } = await apiFn(...args)
-    setData(d)
+    // Only update data if new data arrived — keep previous on error/null
+    if (d !== null && d !== undefined) setData(d)
     setError(e)
     setLoading(false)
   // eslint-disable-next-line react-hooks/exhaustive-deps

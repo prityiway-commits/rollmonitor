@@ -895,24 +895,14 @@ function WearEvolution3D({ records }) {
       const yLabels = []
 
       sweeps.forEach((sweep, si) => {
-        // Use avgW from metadata (new format) OR compute from wear_data (old format)
+        // avgW per spos for this sweep
         const sposByPos = {}
         sweep.forEach(r => {
           const spos = Math.round((parseFloat(r.spos) || 0) * 10) / 10
-          let w = null
-          // New format: avgW stored in DynamoDB metadata
-          if (r.avgW !== undefined && r.avgW !== null) {
-            w = parseFloat(r.avgW)
-          } else {
-            // Old format: compute from wear_data array
-            const W = parseWearArr(r.wear_data)
-            if (W.length > 0 && Math.max(...W) <= 100) {
-              w = arrAvg(W)
-            }
-          }
-          if (w !== null && !isNaN(w) && Math.abs(w) <= 100) {
+          const W = parseWearArr(r.wear_data)
+          if (W.length > 0 && Math.max(...W) <= 100) {
             if (!sposByPos[spos]) sposByPos[spos] = []
-            sposByPos[spos].push(w)
+            sposByPos[spos].push(arrAvg(W))
           }
         })
 
@@ -1234,23 +1224,6 @@ export default function WearResults() {
   // sposDataFull for heatmap/polar uses S3 full records (has wear_data[])
   const sposDataFull = useMemo(() => buildSpossData(fullRecords.length ? fullRecords : records), [fullRecords, records])
 
-  // Stable versions — keep previous data visible during live polling refresh
-  // Refs ONLY update when new non-empty data arrives — never overwritten with []
-  const stableSposDataRef     = useRef([])
-  const stableSposDataFullRef = useRef([])
-  const stableRecordsRef      = useRef([])
-  if (sposData.length > 0)     stableSposDataRef.current     = sposData
-  if (sposDataFull.length > 0) stableSposDataFullRef.current = sposDataFull
-  if (records.length > 0)      stableRecordsRef.current      = records
-
-  // In live mode always show last good data — never show empty
-  const stableSposData     = mode === 'live' && stableSposDataRef.current.length > 0
-    ? stableSposDataRef.current : sposData
-  const stableSposDataFull = mode === 'live' && stableSposDataFullRef.current.length > 0
-    ? stableSposDataFullRef.current : sposDataFull
-  const stableRecords      = mode === 'live' && stableRecordsRef.current.length > 0
-    ? stableRecordsRef.current : records
-
   // ── Current SPOS card ─────────────────────────────────────
   const currentSpos = useMemo(() => {
     if (!records.length) return 0
@@ -1271,14 +1244,14 @@ export default function WearResults() {
   }, [records])
 
   // ── Chart data ────────────────────────────────────────────
-  const chartLabels = stableSposData.map(r => `${r.spos}mm`)
+  const chartLabels = sposData.map(r => `${r.spos}mm`)
 
   const scData = {
     labels: chartLabels,
     datasets: [
       {
         label: 'S[i] — Sensor reading (mm)',
-        data: stableSposData.map(r => r.avgS !== null ? parseFloat(r.avgS.toFixed(3)) : null),
+        data: sposData.map(r => r.avgS !== null ? parseFloat(r.avgS.toFixed(3)) : null),
         borderColor: '#3b82f6',
         backgroundColor: 'rgba(59,130,246,0.25)',
         borderWidth: 1.5,
@@ -1288,7 +1261,7 @@ export default function WearResults() {
       },
       {
         label: 'C[i] — Calibration curve (mm)',
-        data: stableSposData.map(r => r.avgC !== null ? parseFloat(r.avgC.toFixed(3)) : null),
+        data: sposData.map(r => r.avgC !== null ? parseFloat(r.avgC.toFixed(3)) : null),
         borderColor: '#ef4444',
         backgroundColor: 'transparent',
         borderWidth: 2,
@@ -1304,7 +1277,7 @@ export default function WearResults() {
     datasets: [
       {
         label: 'W[i] — Wear data (mm)',
-        data: stableSposData.map(r => r.avgW !== null ? parseFloat(r.avgW.toFixed(3)) : null),
+        data: sposData.map(r => r.avgW !== null ? parseFloat(r.avgW.toFixed(3)) : null),
         borderColor: '#1d6fbd',
         backgroundColor: 'rgba(29,111,189,0.15)',
         borderWidth: 1.5,
@@ -1552,7 +1525,7 @@ export default function WearResults() {
       )}
 
       {/* ── Section 2: SPOS card ── */}
-      {(stableRecords.length > 0 || mode === 'live') && (
+      {(records.length > 0 || mode === 'live') && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '14px' }}>
           <StatCard
             label="Current SPOS"
@@ -1563,13 +1536,13 @@ export default function WearResults() {
           />
           <StatCard
             label="Records loaded"
-            value={stableRecords.length}
+            value={records.length}
             color="#8b5cf6"
-            sub={`${stableSposData.length} unique spos positions`}
+            sub={`${sposData.length} unique spos positions`}
           />
           <StatCard
             label="Spos range"
-            value={stableSposData.length ? `${fmt2(stableSposData[0].spos)} → ${fmt2(stableSposData[stableSposData.length-1].spos)}` : '—'}
+            value={sposData.length ? `${fmt2(sposData[0].spos)} → ${fmt2(sposData[sposData.length-1].spos)}` : '—'}
             unit="mm"
             color="#10b981"
             sub="Along roller length"
@@ -1578,7 +1551,7 @@ export default function WearResults() {
       )}
 
       {/* ── Section 3: Charts ── */}
-      {(stableSposData.length > 0) && (
+      {sposData.length > 0 && (
         <div className="card">
           <SectionHead title={`Sensor Profile — ${rollName}`} />
           <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '16px', lineHeight: '1.6' }}>
@@ -1609,13 +1582,13 @@ export default function WearResults() {
           {/* 1. Plotly Heatmap — uses full S3 records */}
           <ChartErrorBoundary>
             {s3Loading && <div style={{ padding:'1rem', color:'#94a3b8', fontSize:'12px' }}>⏳ Loading full data from S3 for heatmap...</div>}
-            <PlotlyHeatmap sposData={stableSposDataFull} />
+            <PlotlyHeatmap sposData={sposDataFull} />
           </ChartErrorBoundary>
 
           {/* 2. Wear Polar — uses full S3 records */}
           <ChartErrorBoundary>
             <WearPolarPlot
-              sposData={stableSposDataFull}
+              sposData={sposDataFull}
               rollid={rollid}
               sysid={sysid}
               liveMode={mode === 'live'}
@@ -1625,14 +1598,14 @@ export default function WearResults() {
 
 
           {/* 3D Surface — historical mode only */}
-          {mode === 'historical' && records.length > 0 && (
+          {mode === 'historical' && (fullRecords.length > 0 || records.length > 0) && (
             <ChartErrorBoundary>
-              <WearEvolution3D records={records} />
+              <WearEvolution3D records={fullRecords.length ? fullRecords : records} />
             </ChartErrorBoundary>
           )}
 
           <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px', textAlign: 'right' }}>
-            Last data: {fmtDt(lastRecordDt)} · {stableRecords.length} records · {stableSposData.length} spos positions
+            Last data: {fmtDt(lastRecordDt)} · {records.length} records · {sposData.length} spos positions
           </div>
         </div>
       )}

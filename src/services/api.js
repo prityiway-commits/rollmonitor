@@ -115,6 +115,28 @@ export function fetchWearData(sysid, rollid, fromISO, toISO) {
 }
 
 /**
+ * Fetch S3 keys for a date range (for heatmap/polar full data).
+ */
+export function fetchS3Keys(sysid, rollid, fromISO, toISO) {
+  return safeGet({ action: 's3_keys', sysid, rollid, from: fromISO, to: toISO })
+}
+
+/**
+ * Fetch a single full record from S3.
+ */
+export function fetchS3Record(key) {
+  return safeGet({ action: 's3_record', key })
+}
+
+/**
+ * Batch fetch multiple S3 records in one Lambda call.
+ * keys: array of S3 key strings
+ */
+export function fetchS3Batch(keys) {
+  return safeGet({ action: 's3_batch', keys: keys.join(',') })
+}
+
+/**
  * RollWearMeasStarted events (optional date range).
  */
 export function fetchMeasStarted(sysid, fromISO, toISO) {
