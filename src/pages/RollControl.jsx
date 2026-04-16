@@ -507,6 +507,51 @@ export default function RollControl() {
   const [loading,   setLoading]     = useState(false)
   const [lastError, setLastError]   = useState(null)
 
+  // ── Scheduler state ───────────────────────────────────────
+  const INTERVALS = [
+    { label: 'Every 4 hours',  count: 6  },
+    { label: 'Every 6 hours',  count: 4  },
+    { label: 'Every 8 hours',  count: 3  },
+    { label: 'Every 12 hours', count: 2  },
+    { label: 'Every 24 hours', count: 1  },
+  ]
+
+  const [schedule, setSchedule] = useState(() => {
+    try {
+      const s = localStorage.getItem(SCHEDULE_KEY(sysid))
+      return s ? JSON.parse(s) : { enabled: false, intervalCount: 4, startTime: '08:00' }
+    } catch { return { enabled: false, intervalCount: 4, startTime: '08:00' } }
+  })
+  const scheduleRef   = useRef(schedule)
+  const schedTimerRef = useRef(null)
+
+  useEffect(() => {
+    scheduleRef.current = schedule
+    localStorage.setItem(SCHEDULE_KEY(sysid), JSON.stringify(schedule))
+  }, [schedule, sysid])
+
+  // Check every minute if a scheduled slot is due
+  useEffect(() => {
+    function checkSchedule() {
+      const s = scheduleRef.current
+      if (!s.enabled || !s.startTime) return
+      const slots = calcSlots(s.startTime, s.intervalCount)
+      const now   = new Date()
+      const hh    = String(now.getHours()).padStart(2,'0')
+      const mm    = String(now.getMinutes()).padStart(2,'0')
+      const nowStr = `${hh}:${mm}`
+      if (slots.includes(nowStr)) {
+        toast.success(`Scheduled measurement started at ${nowStr}`)
+        postMeasStart(sysid)
+      }
+    }
+    schedTimerRef.current = setInterval(checkSchedule, 60000)
+    return () => clearInterval(schedTimerRef.current)
+  }, [sysid])
+
+  const schedSlots    = calcSlots(schedule.startTime, schedule.intervalCount)
+  const nextSlot      = nextSlotCountdown(schedSlots)
+
   // Fetch latest status for showing current PLC values
   const statusFrom = useMemo(() => {
     const d = new Date(); d.setHours(d.getHours() - 24); return d.toISOString()
@@ -725,6 +770,113 @@ export default function RollControl() {
           <button className="btn-primary" onClick={() => setModal({ type:'config', open:true })}>
             ✓ Apply Configuration
           </button>
+        </div>
+      </div>
+
+      {/* ── Section 4: Schedule Measurement ── */}
+      <div className="card">
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'16px' }}>
+          <div>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Schedule Measurement</div>
+            <div style={{ fontSize:'12px', color:'#94a3b8', marginTop:'2px' }}>
+              Automatically trigger MeasStart on MQTT at scheduled intervals
+            </div>
+          </div>
+          {/* Enable/Disable toggle */}
+          <label style={{ display:'flex', alignItems:'center', gap:'8px', cursor:'pointer' }}>
+            <span style={{ fontSize:'13px', color:'#64748b' }}>{schedule.enabled ? 'Enabled' : 'Disabled'}</span>
+            <div
+              onClick={() => setSchedule(s => ({ ...s, enabled: !s.enabled }))}
+              style={{
+                width:'44px', height:'24px', borderRadius:'12px', cursor:'pointer',
+                background: schedule.enabled ? '#1d4ed8' : '#e2e8f0',
+                position:'relative', transition:'background 0.2s',
+              }}
+            >
+              <div style={{
+                position:'absolute', top:'3px',
+                left: schedule.enabled ? '22px' : '3px',
+                width:'18px', height:'18px', borderRadius:'50%',
+                background:'#fff', transition:'left 0.2s',
+                boxShadow:'0 1px 3px rgba(0,0,0,0.2)',
+              }} />
+            </div>
+          </label>
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px' }}>
+          {/* Interval selector */}
+          <div>
+            <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:'8px' }}>
+              Measurement Interval
+            </div>
+            <div style={{ display:'flex', flexDirection:'column', gap:'6px' }}>
+              {INTERVALS.map(({ label, count }) => (
+                <label key={count} style={{ display:'flex', alignItems:'center', gap:'10px', cursor:'pointer',
+                  padding:'8px 12px', borderRadius:'8px',
+                  background: schedule.intervalCount === count ? '#eff6ff' : '#f8fafc',
+                  border: `1.5px solid ${schedule.intervalCount === count ? '#bfdbfe' : '#e2e8f0'}`,
+                }}>
+                  <input type="radio" name="interval" value={count}
+                    checked={schedule.intervalCount === count}
+                    onChange={() => setSchedule(s => ({ ...s, intervalCount: count }))}
+                    style={{ accentColor:'#1d4ed8' }}
+                  />
+                  <span style={{ fontSize:'13px', color:'#1e293b', fontWeight: schedule.intervalCount === count ? '600' : '400' }}>
+                    {label}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Start time + schedule preview */}
+          <div>
+            <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:'8px' }}>
+              First Measurement Time
+            </div>
+            <input
+              type="time"
+              value={schedule.startTime}
+              onChange={e => setSchedule(s => ({ ...s, startTime: e.target.value }))}
+              style={{
+                width:'100%', padding:'8px 12px', fontSize:'14px', fontFamily:'"JetBrains Mono",monospace',
+                border:'1.5px solid #e2e8f0', borderRadius:'8px', background:'#fff',
+                color:'#1e293b', outline:'none', marginBottom:'16px',
+              }}
+            />
+
+            {schedSlots.length > 0 && (
+              <>
+                <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748b', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:'6px' }}>
+                  Scheduled Times (Today)
+                </div>
+                <div style={{ display:'flex', flexWrap:'wrap', gap:'6px', marginBottom:'12px' }}>
+                  {schedSlots.map(slot => (
+                    <span key={slot} style={{
+                      fontSize:'12px', fontFamily:'"JetBrains Mono",monospace',
+                      padding:'3px 8px', borderRadius:'6px',
+                      background:'#f0fdf4', border:'1px solid #bbf7d0', color:'#166534',
+                    }}>
+                      {slot}
+                    </span>
+                  ))}
+                </div>
+
+                {nextSlot && schedule.enabled && (
+                  <div style={{ padding:'10px 12px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'8px', fontSize:'12px', color:'#1d4ed8' }}>
+                    ⏰ Next: {nextSlot.label}
+                  </div>
+                )}
+
+                {!schedule.enabled && (
+                  <div style={{ padding:'10px 12px', background:'#fafafa', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', color:'#94a3b8' }}>
+                    Enable the schedule to activate automatic measurements
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
