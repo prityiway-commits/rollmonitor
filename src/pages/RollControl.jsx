@@ -8,6 +8,7 @@
  */
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import toast from 'react-hot-toast'
+import { useAuth } from '../context/AuthContext'
 import {
   postMeasConfig, postMeasStart, postMeasStop,
   fetchMeasStarted, fetchMeasFinished, fetchStatusHistory, toArray,
@@ -500,6 +501,7 @@ function ScheduleSection({ sysid, onScheduledAction }) {
 const safeFloat = v => { const n = parseFloat(v); return isNaN(n) ? null : n }
 
 export default function RollControl() {
+  const { authCall } = useAuth()
   const [sysid, setSysId]           = useSysId()
   const { names, updateName }       = useRollNames()
   const [config,    setConfig]      = useState(() => loadSavedConfig(sysid))
@@ -516,41 +518,94 @@ export default function RollControl() {
     { label: 'Every 24 hours', count: 1  },
   ]
 
-  const [schedule, setSchedule] = useState(() => {
+  const DEFAULT_SCHED = { enabled: false, intervalCount: 6, startTime: '08:00', slotsUtc: [] }
+
+  // Cache key per sysid — restores schedule instantly on navigation
+  const SCHED_CACHE_KEY = `rollmonitor_sched_cache_${sysid}`
+
+  function getCachedSched() {
     try {
-      const s = localStorage.getItem(SCHEDULE_KEY(sysid))
-      return s ? JSON.parse(s) : { enabled: false, intervalCount: 4, startTime: '08:00' }
-    } catch { return { enabled: false, intervalCount: 4, startTime: '08:00' } }
-  })
-  const scheduleRef   = useRef(schedule)
-  const schedTimerRef = useRef(null)
+      const s = sessionStorage.getItem(SCHED_CACHE_KEY)
+      return s ? JSON.parse(s) : DEFAULT_SCHED
+    } catch { return DEFAULT_SCHED }
+  }
 
-  useEffect(() => {
-    scheduleRef.current = schedule
-    localStorage.setItem(SCHEDULE_KEY(sysid), JSON.stringify(schedule))
-  }, [schedule, sysid])
+  // applied = what's saved in DB (shown to all users)
+  // draft   = what user is editing locally (not yet saved)
+  const [applied,      setApplied]      = useState(() => getCachedSched())
+  const [draft,        setDraft]        = useState(() => getCachedSched())
+  const [schedLoading, setSchedLoading] = useState(false)
+  const [schedSaving,  setSchedSaving]  = useState(false)
+  const [schedSaved,   setSchedSaved]   = useState(false)
 
-  // Check every minute if a scheduled slot is due
+  const isDirty = JSON.stringify(draft) !== JSON.stringify(applied)
+
+  // Convert local HH:MM to UTC HH:MM
+  function localToUtc(localHHMM) {
+    if (!localHHMM) return '00:00'
+    const [h, m] = localHHMM.split(':').map(Number)
+    const d = new Date()
+    d.setHours(h, m, 0, 0)
+    return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`
+  }
+
+  // Convert UTC HH:MM to local HH:MM for display
+  function utcToLocal(utcHHMM) {
+    if (!utcHHMM) return '00:00'
+    const [h, m] = utcHHMM.split(':').map(Number)
+    const d = new Date()
+    d.setUTCHours(h, m, 0, 0)
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+  }
+
+  // Load schedule from API on sysid change — sets BOTH applied and draft
   useEffect(() => {
-    function checkSchedule() {
-      const s = scheduleRef.current
-      if (!s.enabled || !s.startTime) return
-      const slots = calcSlots(s.startTime, s.intervalCount)
-      const now   = new Date()
-      const hh    = String(now.getHours()).padStart(2,'0')
-      const mm    = String(now.getMinutes()).padStart(2,'0')
-      const nowStr = `${hh}:${mm}`
-      if (slots.includes(nowStr)) {
-        toast.success(`Scheduled measurement started at ${nowStr}`)
-        postMeasStart(sysid)
+    if (!sysid) return
+    setSchedLoading(true)
+    authCall('get_schedule', { sysid }).then(({ data }) => {
+      if (data && data.sysid) {
+        const loaded = {
+          enabled:       data.enabled || false,
+          intervalCount: parseInt(data.intervalCount) || 6,
+          startTime:     data.slotsUtc?.length ? utcToLocal(data.slotsUtc[0]) : '08:00',
+          slotsUtc:      data.slotsUtc || [],
+          updatedBy:     data.updatedBy || '',
+        }
+        // Cache so navigation doesn't flash defaults
+        try { sessionStorage.setItem(SCHED_CACHE_KEY, JSON.stringify(loaded)) } catch {}
+        setApplied(loaded)
+        setDraft(loaded)
       }
-    }
-    schedTimerRef.current = setInterval(checkSchedule, 60000)
-    return () => clearInterval(schedTimerRef.current)
+      setSchedLoading(false)
+    })
   }, [sysid])
 
-  const schedSlots    = calcSlots(schedule.startTime, schedule.intervalCount)
-  const nextSlot      = nextSlotCountdown(schedSlots)
+  // Apply button — saves draft to API
+  async function applySchedule() {
+    if (!sysid) return
+    setSchedSaving(true)
+    const localSlots = calcSlots(draft.startTime, draft.intervalCount)
+    const utcSlots   = localSlots.map(localToUtc)
+    const toSave     = { ...draft, slotsUtc: utcSlots }
+    const { error: e } = await authCall('save_schedule', {
+      sysid,
+      enabled:       toSave.enabled,
+      intervalCount: toSave.intervalCount,
+      startTime:     toSave.startTime,
+      slotsUtc:      utcSlots,
+    })
+    setSchedSaving(false)
+    if (e) { toast.error(`Failed to save: ${e}`); return }
+    try { sessionStorage.setItem(SCHED_CACHE_KEY, JSON.stringify(toSave)) } catch {}
+    setApplied(toSave)
+    setDraft(toSave)
+    setSchedSaved(true)
+    setTimeout(() => setSchedSaved(false), 3000)
+    toast.success('Schedule applied — visible to all users')
+  }
+
+  const schedSlots = calcSlots(draft.startTime, draft.intervalCount)
+  const nextSlot   = nextSlotCountdown(calcSlots(applied.startTime, applied.intervalCount))
 
   // Fetch latest status for showing current PLC values
   const statusFrom = useMemo(() => {
@@ -558,6 +613,26 @@ export default function RollControl() {
   }, [])
   const statusTo = useMemo(() => new Date().toISOString(), [])
   const { data: statusRaw } = useApi(fetchStatusHistory, [sysid, statusFrom, statusTo], { pollMs: 30000 })
+  // Fetch latest MeasStarted to show measurement status in scheduler
+  const { data: measStartedRaw } = useApi(fetchMeasStarted, [sysid], { pollMs: 30000 })
+  const { data: measFinishedRaw } = useApi(fetchMeasFinished, [sysid], { pollMs: 30000 })
+
+  const measIsActive = useMemo(() => {
+    const started  = toArray(measStartedRaw).filter(r => r.sysid)
+    const finished = toArray(measFinishedRaw).filter(r => r.sysid)
+    if (!started.length) return false
+    const lastStart  = started.sort((a,b)  => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    const lastFinish = finished.sort((a,b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+    if (!lastFinish) return true
+    return String(lastStart.datetime) > String(lastFinish.datetime)
+  }, [measStartedRaw, measFinishedRaw])
+
+  const lastMeasStart = useMemo(() => {
+    const started = toArray(measStartedRaw).filter(r => r.sysid)
+    if (!started.length) return null
+    return started.sort((a,b) => String(b.datetime).localeCompare(String(a.datetime)))[0]
+  }, [measStartedRaw])
+
   const latestStatus = useMemo(() => {
     const items = toArray(statusRaw).filter(r => r.sysid && r.sysid !== 'unknown')
     if (!items.length) return null
@@ -775,27 +850,112 @@ export default function RollControl() {
 
       {/* ── Section 4: Schedule Measurement ── */}
       <div className="card">
+        {/* Active schedule summary — always visible at top */}
+        {applied.slotsUtc?.length > 0 && (
+          <div style={{ marginBottom:'16px', padding:'12px 16px', borderRadius:'8px',
+            background: applied.enabled ? '#f0fdf4' : '#f8fafc',
+            border: `1px solid ${applied.enabled ? '#bbf7d0' : '#e2e8f0'}` }}>
+            <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'6px' }}>
+              <div style={{ width:'8px', height:'8px', borderRadius:'50%',
+                background: applied.enabled ? '#22c55e' : '#94a3b8' }} />
+              <span style={{ fontSize:'13px', fontWeight:'700',
+                color: applied.enabled ? '#166534' : '#64748b' }}>
+                {applied.enabled ? 'Schedule Active' : 'Schedule Inactive'}
+              </span>
+            </div>
+            <div style={{ display:'flex', gap:'24px', flexWrap:'wrap' }}>
+              <div>
+                <span style={{ fontSize:'11px', color:'#94a3b8' }}>Frequency</span>
+                <div style={{ fontSize:'13px', fontWeight:'600', color:'#1e293b', marginTop:'2px' }}>
+                  {INTERVALS.find(i => i.count === applied.intervalCount)?.label || `Every ${applied.intervalCount} slots`}
+                </div>
+              </div>
+              <div>
+                <span style={{ fontSize:'11px', color:'#94a3b8' }}>First slot (local time)</span>
+                <div style={{ fontSize:'13px', fontWeight:'600', color:'#1e293b', fontFamily:'"JetBrains Mono",monospace', marginTop:'2px' }}>
+                  {applied.startTime}
+                </div>
+              </div>
+              <div>
+                <span style={{ fontSize:'11px', color:'#94a3b8' }}>All slots today</span>
+                <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', marginTop:'2px' }}>
+                  {calcSlots(applied.startTime, applied.intervalCount).map(s => (
+                    <span key={s} style={{ fontSize:'11px', fontFamily:'"JetBrains Mono",monospace',
+                      padding:'3px 8px', borderRadius:'4px', background:'#f1f5f9', color:'#475569',
+                      border:'1px solid #e2e8f0', display:'inline-block' }}>
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              {applied.updatedBy && (
+                <div style={{ marginLeft:'auto' }}>
+                  <span style={{ fontSize:'11px', color:'#94a3b8' }}>Last set by</span>
+                  <div style={{ fontSize:'12px', fontWeight:'600', color:'#64748b', marginTop:'2px' }}>
+                    {applied.updatedBy}
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Measurement status indicator */}
+            <div style={{ marginTop:'10px', paddingTop:'10px', borderTop:'1px solid #e2e8f0',
+              display:'flex', alignItems:'center', gap:'10px' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:'6px',
+                padding:'5px 12px', borderRadius:'20px',
+                background: measIsActive ? '#f0fdf4' : '#f8fafc',
+                border: `1px solid ${measIsActive ? '#bbf7d0' : '#e2e8f0'}` }}>
+                <div style={{ width:'7px', height:'7px', borderRadius:'50%',
+                  background: measIsActive ? '#22c55e' : '#94a3b8' }} />
+                <span style={{ fontSize:'12px', fontWeight:'600',
+                  color: measIsActive ? '#166534' : '#64748b' }}>
+                  {measIsActive ? 'Measurement Active' : 'No Active Measurement'}
+                </span>
+              </div>
+              {lastMeasStart && (() => {
+                // Convert DynamoDB datetime (UTC) to local time for display
+                try {
+                  const raw = String(lastMeasStart.datetime)
+                  // Format: 2026-04-16-12:51:00 or 2026-04-16T12:51:00
+                  const iso = raw.replace(/^(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})/, '$1T$2') + (raw.includes('Z') ? '' : 'Z')
+                  const local = new Date(iso).toLocaleString('en-GB', {
+                    day:'2-digit', month:'2-digit', year:'numeric',
+                    hour:'2-digit', minute:'2-digit', hour12: false
+                  })
+                  return <span style={{ fontSize:'11px', color:'#94a3b8' }}>Last started: {local}</span>
+                } catch {
+                  return <span style={{ fontSize:'11px', color:'#94a3b8' }}>Last started: {String(lastMeasStart.datetime).slice(0,16)}</span>
+                }
+              })()}
+            </div>
+          </div>
+        )}
+
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'16px' }}>
           <div>
-            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Schedule Measurement</div>
+            <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+              <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Schedule Measurement</div>
+              {schedLoading && <span style={{ fontSize:'11px', color:'#94a3b8' }}>Loading...</span>}
+              {schedSaved   && <span style={{ fontSize:'11px', color:'#22c55e', fontWeight:'600' }}>✓ Applied — all users see this</span>}
+              {isDirty && !schedSaved && <span style={{ fontSize:'11px', color:'#f59e0b', fontWeight:'600' }}>● Unsaved changes</span>}
+            </div>
             <div style={{ fontSize:'12px', color:'#94a3b8', marginTop:'2px' }}>
-              Automatically trigger MeasStart on MQTT at scheduled intervals
+              Automatically trigger MeasStart on MQTT · Schedule shared with all users
             </div>
           </div>
           {/* Enable/Disable toggle */}
           <label style={{ display:'flex', alignItems:'center', gap:'8px', cursor:'pointer' }}>
-            <span style={{ fontSize:'13px', color:'#64748b' }}>{schedule.enabled ? 'Enabled' : 'Disabled'}</span>
+            <span style={{ fontSize:'13px', color:'#64748b' }}>{draft.enabled ? 'Enabled' : 'Disabled'}</span>
             <div
-              onClick={() => setSchedule(s => ({ ...s, enabled: !s.enabled }))}
+              onClick={() => setDraft(d => ({ ...d, enabled: !d.enabled }))}
               style={{
                 width:'44px', height:'24px', borderRadius:'12px', cursor:'pointer',
-                background: schedule.enabled ? '#1d4ed8' : '#e2e8f0',
+                background: draft.enabled ? '#1d4ed8' : '#e2e8f0',
                 position:'relative', transition:'background 0.2s',
               }}
             >
               <div style={{
                 position:'absolute', top:'3px',
-                left: schedule.enabled ? '22px' : '3px',
+                left: draft.enabled ? '22px' : '3px',
                 width:'18px', height:'18px', borderRadius:'50%',
                 background:'#fff', transition:'left 0.2s',
                 boxShadow:'0 1px 3px rgba(0,0,0,0.2)',
@@ -814,15 +974,15 @@ export default function RollControl() {
               {INTERVALS.map(({ label, count }) => (
                 <label key={count} style={{ display:'flex', alignItems:'center', gap:'10px', cursor:'pointer',
                   padding:'8px 12px', borderRadius:'8px',
-                  background: schedule.intervalCount === count ? '#eff6ff' : '#f8fafc',
-                  border: `1.5px solid ${schedule.intervalCount === count ? '#bfdbfe' : '#e2e8f0'}`,
+                  background: draft.intervalCount === count ? '#eff6ff' : '#f8fafc',
+                  border: `1.5px solid ${draft.intervalCount === count ? '#bfdbfe' : '#e2e8f0'}`,
                 }}>
                   <input type="radio" name="interval" value={count}
-                    checked={schedule.intervalCount === count}
-                    onChange={() => setSchedule(s => ({ ...s, intervalCount: count }))}
+                    checked={draft.intervalCount === count}
+                    onChange={() => setDraft(d => ({ ...d, intervalCount: count }))}
                     style={{ accentColor:'#1d4ed8' }}
                   />
-                  <span style={{ fontSize:'13px', color:'#1e293b', fontWeight: schedule.intervalCount === count ? '600' : '400' }}>
+                  <span style={{ fontSize:'13px', color:'#1e293b', fontWeight: draft.intervalCount === count ? '600' : '400' }}>
                     {label}
                   </span>
                 </label>
@@ -837,8 +997,8 @@ export default function RollControl() {
             </div>
             <input
               type="time"
-              value={schedule.startTime}
-              onChange={e => setSchedule(s => ({ ...s, startTime: e.target.value }))}
+              value={draft.startTime}
+              onChange={e => setDraft(d => ({ ...d, startTime: e.target.value }))}
               style={{
                 width:'100%', padding:'8px 12px', fontSize:'14px', fontFamily:'"JetBrains Mono",monospace',
                 border:'1.5px solid #e2e8f0', borderRadius:'8px', background:'#fff',
@@ -863,17 +1023,45 @@ export default function RollControl() {
                   ))}
                 </div>
 
-                {nextSlot && schedule.enabled && (
+                {nextSlot && applied.enabled && (
                   <div style={{ padding:'10px 12px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'8px', fontSize:'12px', color:'#1d4ed8' }}>
                     ⏰ Next: {nextSlot.label}
+                    <div style={{ fontSize:'11px', color:'#64748b', marginTop:'4px' }}>
+                      EventBridge fires MeasStart automatically at each slot
+                    </div>
                   </div>
                 )}
 
-                {!schedule.enabled && (
+                {!applied.enabled && (
                   <div style={{ padding:'10px 12px', background:'#fafafa', border:'1px solid #e2e8f0', borderRadius:'8px', fontSize:'12px', color:'#94a3b8' }}>
-                    Enable the schedule to activate automatic measurements
+                    {applied.slotsUtc?.length ? 'Schedule disabled — enable and apply to activate' : 'No schedule set yet — configure and click Apply'}
                   </div>
                 )}
+
+                {/* Apply button */}
+                <div style={{ marginTop:'16px', paddingTop:'16px', borderTop:'1px solid #f1f5f9', display:'flex', alignItems:'center', gap:'12px' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={applySchedule}
+                    disabled={schedSaving || schedLoading || !sysid}
+                    style={{ fontSize:'13px', padding:'8px 20px' }}
+                  >
+                    {schedSaving ? '...' : '✓ Apply Schedule'}
+                  </button>
+                  {isDirty && (
+                    <button
+                      onClick={() => setDraft(applied)}
+                      style={{ fontSize:'12px', padding:'6px 14px', border:'1px solid #e2e8f0', borderRadius:'8px', background:'#f8fafc', cursor:'pointer', color:'#64748b' }}
+                    >
+                      Discard changes
+                    </button>
+                  )}
+                  {applied.updatedBy && (
+                    <span style={{ fontSize:'11px', color:'#94a3b8', marginLeft:'auto' }}>
+                      Last set by: {applied.updatedBy}
+                    </span>
+                  )}
+                </div>
               </>
             )}
           </div>
