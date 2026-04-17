@@ -173,14 +173,31 @@ function buildSpossData(records) {
   })
   return Object.entries(bySpos)
     .map(([sposStr, recs]) => {
-      // Use latest valid record at this spos (max W[i] <= 100)
-      const valid = recs.filter(r => {
+      // Sort by datetime descending — newest first
+      const sorted = recs.sort((a, b) =>
+        String(b.datetime).localeCompare(String(a.datetime)))
+
+      // Try new format first: has avgW pre-computed (no wear_data needed)
+      const newFmtRec = sorted.find(r =>
+        r.avgW !== undefined && r.avgW !== null && Math.abs(parseFloat(r.avgW)) <= 100
+      )
+      if (newFmtRec) {
+        return {
+          spos:  parseFloat(sposStr),
+          avgW:  parseFloat(newFmtRec.avgW),
+          avgC:  parseFloat(newFmtRec.avgC || 0),
+          avgS:  parseFloat(newFmtRec.avgS || 0),
+          rec:   newFmtRec,
+        }
+      }
+
+      // Fall back to old format: compute from wear_data[]
+      const valid = sorted.filter(r => {
         const W = parseWearArr(r.wear_data)
         return W.length > 0 && Math.max(...W) <= 100
       })
       if (!valid.length) return null
-      const rec = valid.sort((a, b) =>
-        String(b.datetime).localeCompare(String(a.datetime)))[0]
+      const rec = valid[0]
       const W = parseWearArr(rec.wear_data)
       const C = computeC(rec)
       const S = computeS(rec)
@@ -403,22 +420,17 @@ function PlotlyHeatmap({ sposData }) {
   // Normalized: 0=W=-20, 0.475=W=-1, 0.5=W=0, 0.525=W=+1, 0.6=W=+4, 1=W=+20
   const colorscale = [
     [0,     'rgb(139,0,0)'],      // darkest red — max wear (-20mm)
-    [0.3,   'rgb(255,100,0)'],    // orange
-    [0.45,  'rgb(255,200,150)'],  // light orange (-1mm)
-    [0.5,   'rgb(255,255,255)'],  // white (0mm)
-    [0.55,  'rgb(173,216,230)'],  // light blue (+1mm)
-    [0.7,   'rgb(100,149,237)'],  // medium blue (+4mm)
+    [0.3,   'rgb(255,100,0)'],    // orange (-8mm)
+    [0.4,   'rgb(255,200,150)'],  // light orange (-4mm)
+    [0.45,  'rgb(255,255,255)'],  // white dead band start (-2mm)
+    [0.525, 'rgb(255,255,255)'],  // white dead band end (+1mm)
+    [0.575, 'rgb(173,216,230)'],  // light blue (+3mm)
+    [0.7,   'rgb(100,149,237)'],  // medium blue (+8mm)
     [1,     'rgb(0,0,139)'],      // darkest blue — max buildup (+20mm)
   ]
 
   return (
-    <div style={{ marginTop: '24px' }}>
-      <div style={{ fontSize: '13px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
-        Wear Heatmap — Plotly (Interactive)
-      </div>
-      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '8px' }}>
-        X = spos (mm) · Y = array index (1→{plotData.yLabels.length}) · Colour = W[i] (mm) · Scroll to zoom · Drag to pan
-      </div>
+    <div style={{ marginTop: '8px' }}>
       <Plot
         data={[{
           type:        'heatmap',
@@ -741,16 +753,7 @@ function WearPolarPlot({ sposData, rollid, sysid, liveMode }) {
   if (!sposData.length) return null
 
   return (
-    <div style={{ marginTop: '24px', paddingTop: '20px', borderTop: '2px solid #e2e8f0' }}>
-      <div style={{ fontSize: '14px', fontWeight: '700', color: '#1e293b', marginBottom: '4px' }}>
-        Polar Cross-Section — Wear Profile (r = r1_rad + W[i])
-      </div>
-      <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '12px' }}>
-        <span style={{ color: '#94a3b8', fontWeight: '600' }}>Grey dashed = baseline r1_rad ({radius ?? '...'}mm)</span> ·
-        <span style={{ color: '#1d4ed8', fontWeight: '600' }}> Blue = r1_rad + W[i]</span> ·
-        W &gt; 0 (buildup) → outside · W &lt; 0 (wear) → inside · 5-pt smoothing
-      </div>
-
+    <div style={{ marginTop: '8px' }}>
       {/* Spos selector */}
       <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'12px', flexWrap:'wrap' }}>
         <button onClick={() => currentIdx > 0 && setSelectedSpos(sposList[currentIdx-1])}
@@ -1011,6 +1014,211 @@ function WearEvolution3D({ records }) {
 // Groups records into sweeps using 2hr gap detection between records
 
 
+
+// ── Spos Time-Series Chart ────────────────────────────────────
+// Shows avgW at a selected spos over time — rate of wear visible as slope
+function SposTimeSeries({ records, sposData }) {
+  const [selectedSpos, setSelectedSpos] = useState(null)
+
+  const sposList = useMemo(() =>
+    sposData.map(r => r.spos).sort((a, b) => a - b),
+    [sposData]
+  )
+
+  // Auto-select first spos when data loads
+  useEffect(() => {
+    if (sposList.length > 0 && (selectedSpos === null || !sposList.includes(selectedSpos))) {
+      setSelectedSpos(sposList[0])
+    }
+  }, [sposList])
+
+  const timeData = useMemo(() => {
+    if (selectedSpos === null) return null
+    const target = parseFloat(selectedSpos)
+
+    // Filter records matching this spos (±0.6mm tolerance)
+    const matching = records
+      .filter(r => Math.abs((parseFloat(r.spos) || 0) - target) <= 0.6)
+      .sort((a, b) => String(a.datetime).localeCompare(String(b.datetime)))
+
+    if (!matching.length) return null
+
+    const labels = matching.map(r => {
+      const dt = String(r.datetime)
+      return dt.slice(0, 16).replace('T', ' ').replace(/-/g, '/')
+    })
+
+    const avgWVals = matching.map(r => {
+      const w = parseFloat(r.avgW)
+      return isNaN(w) ? null : parseFloat(w.toFixed(3))
+    })
+
+    // Simple linear regression for trend line
+    const valid = avgWVals.map((v, i) => v !== null ? [i, v] : null).filter(Boolean)
+    let trendVals = null
+    if (valid.length >= 2) {
+      const n  = valid.length
+      const sx = valid.reduce((s, [x]) => s + x, 0)
+      const sy = valid.reduce((s, [, y]) => s + y, 0)
+      const sxy = valid.reduce((s, [x, y]) => s + x * y, 0)
+      const sxx = valid.reduce((s, [x]) => s + x * x, 0)
+      const slope     = (n * sxy - sx * sy) / (n * sxx - sx * sx)
+      const intercept = (sy - slope * sx) / n
+      trendVals = avgWVals.map((_, i) =>
+        parseFloat((slope * i + intercept).toFixed(3))
+      )
+    }
+
+    return { labels, avgWVals, trendVals }
+  }, [records, selectedSpos])
+
+  if (!sposList.length) return null
+
+  const chartData = timeData ? {
+    labels: timeData.labels,
+    datasets: [
+      {
+        label: `avgW at spos=${selectedSpos}mm`,
+        data: timeData.avgWVals,
+        borderColor: '#3b82f6',
+        backgroundColor: 'rgba(59,130,246,0.1)',
+        borderWidth: 2,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        tension: 0.3,
+        fill: 'origin',
+      },
+      ...(timeData.trendVals ? [{
+        label: 'Trend (linear)',
+        data: timeData.trendVals,
+        borderColor: '#ef4444',
+        borderWidth: 1.5,
+        borderDash: [6, 3],
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+      }] : []),
+    ]
+  } : null
+
+  const opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 200 },
+    plugins: {
+      legend: { display: true, labels: { color: '#64748b', font: { size: 11 }, boxWidth: 12 } },
+      tooltip: {
+        backgroundColor: '#1e293b',
+        callbacks: {
+          label: item => ` ${item.dataset.label}: ${item.raw}mm`,
+        }
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: '#94a3b8', font: { size: 10 }, maxRotation: 45, maxTicksLimit: 12 },
+        grid:  { color: '#f1f5f9' },
+        title: { display: true, text: 'Measurement time', color: '#94a3b8', font: { size: 11 } },
+      },
+      y: {
+        ticks: {
+          color: '#94a3b8', font: { size: 10 },
+          callback: v => v > 0 ? `+${v}` : `${v}`,
+        },
+        grid: {
+          color: ctx => ctx.tick.value === 0 ? '#94a3b8' : '#f1f5f9',
+          lineWidth: ctx => ctx.tick.value === 0 ? 1.5 : 1,
+        },
+        title: { display: true, text: 'W[i]  ↑ buildup  /  wear ↓  (mm)', color: '#94a3b8', font: { size: 11 } },
+        min: -10,
+        max:  10,
+      },
+    },
+  }
+
+  // Compute rate of wear from trend slope
+  const trendLabel = useMemo(() => {
+    if (!timeData?.trendVals || timeData.trendVals.length < 2) return null
+    const totalChange = timeData.trendVals[timeData.trendVals.length - 1] - timeData.trendVals[0]
+    const nSweeps     = timeData.trendVals.length - 1
+    const perSweep    = parseFloat((totalChange / nSweeps).toFixed(4))
+    if (Math.abs(perSweep) < 0.0001) return 'Stable — no significant change'
+    return perSweep < 0
+      ? `Wearing at ${Math.abs(perSweep).toFixed(3)}mm per sweep`
+      : `Building up at ${perSweep.toFixed(3)}mm per sweep`
+  }, [timeData])
+
+  return (
+    <div style={{ marginTop:'24px', paddingTop:'20px', borderTop:'2px solid #e2e8f0' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:'16px', marginBottom:'12px', flexWrap:'wrap' }}>
+        <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b', display:'none' }}>
+          Wear Rate — at spos position over time
+        </div>
+        <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
+          <span style={{ fontSize:'12px', color:'#64748b' }}>Position:</span>
+          <button
+            onClick={() => {
+              const idx = sposList.indexOf(selectedSpos)
+              if (idx > 0) setSelectedSpos(sposList[idx - 1])
+            }}
+            disabled={sposList.indexOf(selectedSpos) <= 0}
+            style={{ padding:'4px 10px', fontSize:'13px', borderRadius:'6px',
+              border:'1.5px solid #e2e8f0', background:'#f8fafc', cursor:'pointer',
+              color: sposList.indexOf(selectedSpos) <= 0 ? '#cbd5e1' : '#1e293b',
+              fontWeight:'600', lineHeight:1 }}
+          >&#8249;</button>
+          <select
+            value={selectedSpos ?? ''}
+            onChange={e => setSelectedSpos(parseFloat(e.target.value))}
+            style={{ fontSize:'13px', padding:'4px 10px', borderRadius:'6px',
+              border:'1.5px solid #e2e8f0', background:'#f8fafc',
+              fontFamily:'"JetBrains Mono",monospace', minWidth:'90px', textAlign:'center' }}
+          >
+            {sposList.map(s => (
+              <option key={s} value={s}>{s}mm</option>
+            ))}
+          </select>
+          <button
+            onClick={() => {
+              const idx = sposList.indexOf(selectedSpos)
+              if (idx < sposList.length - 1) setSelectedSpos(sposList[idx + 1])
+            }}
+            disabled={sposList.indexOf(selectedSpos) >= sposList.length - 1}
+            style={{ padding:'4px 10px', fontSize:'13px', borderRadius:'6px',
+              border:'1.5px solid #e2e8f0', background:'#f8fafc', cursor:'pointer',
+              color: sposList.indexOf(selectedSpos) >= sposList.length - 1 ? '#cbd5e1' : '#1e293b',
+              fontWeight:'600', lineHeight:1 }}
+          >&#8250;</button>
+          <span style={{ fontSize:'11px', color:'#94a3b8', marginLeft:'4px' }}>
+            {sposList.length > 0 ? `${sposList.indexOf(selectedSpos) + 1} / ${sposList.length}` : ''}
+          </span>
+        </div>
+        {trendLabel && (
+          <div style={{ padding:'4px 12px', borderRadius:'20px', fontSize:'12px', fontWeight:'600',
+            background: trendLabel.includes('Wear') ? '#fff5f5' : trendLabel.includes('Building') ? '#eff6ff' : '#f0fdf4',
+            color:      trendLabel.includes('Wear') ? '#dc2626' : trendLabel.includes('Building') ? '#1d4ed8' : '#166534',
+            border: `1px solid ${trendLabel.includes('Wear') ? '#fecaca' : trendLabel.includes('Building') ? '#bfdbfe' : '#bbf7d0'}`,
+          }}>
+            {trendLabel}
+          </div>
+        )}
+      </div>
+      {chartData ? (
+        <div style={{ height:'260px' }}>
+          <Line data={chartData} options={opts} />
+        </div>
+      ) : (
+        <div style={{ padding:'2rem', textAlign:'center', color:'#94a3b8', fontSize:'13px' }}>
+          No data for spos={selectedSpos}mm in this time range
+        </div>
+      )}
+      <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'6px' }}>
+        Blue = avgW over time · Red dashed = trend line · Slope indicates wear rate
+      </div>
+    </div>
+  )
+}
+
 // ── Stat Card ─────────────────────────────────────────────────
 function StatCard({ label, value, unit, sub, color }) {
   return (
@@ -1195,13 +1403,27 @@ export default function WearResults() {
     const newFmt = meta.filter(r => r.s3_key)
     const oldFmt = meta.filter(r => r.wear_data)
 
-    // Old format already has wear_data — use directly
-    if (!newFmt.length) { setS3Records(oldFmt); return }
+    console.log(`[S3] ${meta.length} records: ${newFmt.length} new (s3_key), ${oldFmt.length} old (wear_data)`)
+
+    // Old format — has wear_data[] directly in DynamoDB, use as-is
+    if (!newFmt.length) {
+      console.log('[S3] All old format — using DynamoDB wear_data directly')
+      setS3Records(oldFmt)
+      return
+    }
+
+    // Mixed: some old + some new
+    if (!newFmt.length) {
+      setS3Records(oldFmt)
+      return
+    }
 
     // New format — batch fetch from S3
     setS3Loading(true)
     const BATCH = 50
     const keys = newFmt.map(r => r.s3_key)
+    console.log('[S3] Fetching', keys.length, 'S3 records, first key:', keys[0])
+
     const batches = []
     for (let i = 0; i < keys.length; i += BATCH)
       batches.push(keys.slice(i, i + BATCH))
@@ -1210,10 +1432,17 @@ export default function WearResults() {
       .then(results => {
         const all = []
         results.forEach(r => { if (r.data?.records) all.push(...r.data.records) })
+        console.log(`[S3] Fetched ${all.length} records from S3`)
+        // Merge old format (direct wear_data) + new format (from S3)
         setS3Records([...oldFmt, ...all])
         setS3Loading(false)
       })
-      .catch(() => { setS3Records(oldFmt); setS3Loading(false) })
+      .catch(e => {
+        console.error('[S3] Batch fetch failed:', e)
+        // Fallback — use old format records only, show what we have
+        setS3Records(oldFmt)
+        setS3Loading(false)
+      })
   }, [rawData])
 
   // Meta records — used for line charts (avgW, avgS, avgC per spos)
@@ -1375,6 +1604,27 @@ export default function WearResults() {
       },
     },
   })
+
+  // Wear chart options — Y axis ±10mm, reversed so wear (negative) is at bottom
+  const wearOpts = {
+    ...commonOpts('W[i] wear (mm)'),
+    scales: {
+      ...commonOpts('W[i] wear (mm)').scales,
+      y: {
+        ticks: {
+          color: '#94a3b8', font: { size: 10 },
+          callback: v => v > 0 ? `+${v} buildup` : v < 0 ? `${v} wear` : '0',
+        },
+        grid: {
+          color: ctx => ctx.tick.value === 0 ? '#94a3b8' : '#f1f5f9',
+          lineWidth: ctx => ctx.tick.value === 0 ? 1.5 : 1,
+        },
+        title: { display: true, text: 'W[i]  ↑ buildup  /  wear ↓  (mm)', color: '#94a3b8', font: { size: 11 } },
+        min: -10,
+        max:  10,
+      },
+    },
+  }
 
   const inputStyle = {
     padding: '8px 12px', fontSize: '13px',
@@ -1581,38 +1831,38 @@ export default function WearResults() {
       {(stableSposData.length > 0) && (
         <div className="card">
           <SectionHead title={`Sensor Profile — ${rollName}`} />
-          <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '16px', lineHeight: '1.6' }}>
-            X axis = axial position (spos mm) · Each point = avg across one full revolution ·
-            <span style={{ color: '#3b82f6', fontWeight: '600' }}> Blue = S[i] sensor reading</span> ·
-            <span style={{ color: '#ef4444', fontWeight: '600' }}> Red = C[i] calibration curve</span>
-          </div>
-
-          {/* Chart 1: S[i] and C[i] */}
-          <ChartErrorBoundary>
-            <div style={{ height: '280px', marginBottom: '8px' }}>
-              <Line data={scData} options={commonOpts('Distance (mm)', sensorRange.min, sensorRange.max)} />
+          {/* ── 1. Wear Heat Map ── */}
+          <div style={{ marginBottom:'8px' }}>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Wear Heat Map</div>
+            <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'2px', lineHeight:'1.6' }}>
+              W[i] colour-coded across axial position and sweep index · orange/red = wear · blue = buildup · white = normal (−2mm to +1mm)
+              <br/>X = spos (mm) · Y = array index · Colour = W[i] (mm) · Scroll to zoom · Drag to pan
             </div>
-          </ChartErrorBoundary>
-
-          <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '20px', marginBottom: '8px', lineHeight: '1.6' }}>
-            <span style={{ color: '#1d6fbd', fontWeight: '600' }}>Blue = W[i] = S[i] − C[i]</span> ·
-            Positive = wear (surface moved away) · Negative = buildup
           </div>
-
-          {/* Chart 2: W[i] */}
           <ChartErrorBoundary>
-            <div style={{ height: '220px' }}>
-              <Line data={wData} options={commonOpts('Wear W[i] (mm)')} />
-            </div>
-          </ChartErrorBoundary>
-
-          {/* 1. Plotly Heatmap — uses full S3 records */}
-          <ChartErrorBoundary>
-            {s3Loading && <div style={{ padding:'1rem', color:'#94a3b8', fontSize:'12px' }}>⏳ Loading full data from S3 for heatmap...</div>}
+            {s3Loading && <div style={{ padding:'1rem', color:'#94a3b8', fontSize:'12px' }}>⏳ Loading full data from S3...</div>}
             <PlotlyHeatmap sposData={stableSposDataFull} />
           </ChartErrorBoundary>
 
-          {/* 2. Wear Polar — uses full S3 records */}
+          {/* ── 2. Wear Rate over time ── */}
+          <div style={{ marginTop:'32px', marginBottom:'8px' }}>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Wear Rate — at spos position over time</div>
+            <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'2px', lineHeight:'1.6' }}>
+              avgW at selected axial position over measurement history · slope of trend line = rate of wear per sweep
+            </div>
+          </div>
+          <ChartErrorBoundary>
+            <SposTimeSeries records={records} sposData={stableSposData} />
+          </ChartErrorBoundary>
+
+          {/* ── 3. Polar Cross-Section ── */}
+          <div style={{ marginTop:'32px', marginBottom:'8px' }}>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Polar Cross-Section — Wear Profile</div>
+            <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'2px', lineHeight:'1.6' }}>
+              Cross-section of roller at selected spos · Grey dashed = Roller Radius (r1_rad) · Wear radius (Blue Line) = Roller Radius (r1_rad) + W[i]
+              <br/>W &lt; 0 (wear) → inside · W &gt; 0 (buildup) → outside
+            </div>
+          </div>
           <ChartErrorBoundary>
             <WearPolarPlot
               sposData={stableSposDataFull}
@@ -1622,14 +1872,35 @@ export default function WearResults() {
             />
           </ChartErrorBoundary>
 
+          {/* ── 4. Calibration Curve ── */}
+          <div style={{ marginTop:'32px', marginBottom:'8px' }}>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Calibration Curve <span style={{ fontSize:'12px', fontWeight:'400', color:'#64748b' }}>(For Sensor Maintenance)</span></div>
+            <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'2px' }}>
+              S[i] = measured sensor distance · C[i] = calibration curve = aParam·i² + bParam·i + cParam · X axis = axial position (spos mm)
+            </div>
+          </div>
+          <ChartErrorBoundary>
+            <div style={{ height:'280px' }}>
+              <Line data={scData} options={commonOpts('Distance (mm)', sensorRange.min, sensorRange.max)} />
+            </div>
+          </ChartErrorBoundary>
+
+          {/* ── 5. Wear Curve ── */}
+          <div style={{ marginTop:'32px', marginBottom:'8px' }}>
+            <div style={{ fontSize:'14px', fontWeight:'700', color:'#1e293b' }}>Wear Curve</div>
+            <div style={{ fontSize:'11px', color:'#94a3b8', marginTop:'2px' }}>
+              W[i] = S[i] − C[i] · positive = buildup (surface above calibration) · negative = wear (surface below calibration)
+            </div>
+          </div>
+          <ChartErrorBoundary>
+            <div style={{ height:'220px' }}>
+              <Line data={wData} options={wearOpts} />
+            </div>
+          </ChartErrorBoundary>
 
 
-          {/* 3D Surface — historical mode only */}
-          {mode === 'historical' && records.length > 0 && (
-            <ChartErrorBoundary>
-              <WearEvolution3D records={records} />
-            </ChartErrorBoundary>
-          )}
+
+
 
           <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px', textAlign: 'right' }}>
             Last data: {fmtDt(lastRecordDt)} · {stableRecords.length} records · {stableSposData.length} spos positions
